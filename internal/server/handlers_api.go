@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"tronbyt-server/internal/apps"
@@ -71,6 +72,38 @@ type DimMode struct {
 type Interstitial struct {
 	Enabled bool    `json:"enabled"`
 	App     *string `json:"app"`
+}
+
+// OverridePhase represents a single phase in a multi-phase override request.
+type OverridePhase struct {
+	Kind           string `json:"kind"`
+	DurationSec    int    `json:"durationSec"`
+	DisplayTimeSec *int   `json:"displayTimeSec"`
+	Shows          *int   `json:"shows"`
+}
+
+// OverrideCreateRequest represents a request to create a device override.
+type OverrideCreateRequest struct {
+	Kind           string          `json:"kind"`
+	Priority       *int            `json:"priority"`
+	DurationSec    *int            `json:"durationSec"`
+	DisplayTimeSec *int            `json:"displayTimeSec"`
+	Shows          *int            `json:"shows"`
+	Image          string          `json:"image"`
+	Phases         []OverridePhase `json:"phases"`
+}
+
+type OverridePayload struct {
+	ID             string            `json:"id"`
+	Kind           data.OverrideKind `json:"kind"`
+	Priority       int               `json:"priority"`
+	StartsAt       *string           `json:"startsAt,omitempty"`
+	EndsAt         *string           `json:"endsAt,omitempty"`
+	RemainingShows *int              `json:"remainingShows,omitempty"`
+	DisplayTimeSec *int              `json:"displayTimeSec,omitempty"`
+	GroupID        *string           `json:"groupId,omitempty"`
+	LastServedAt   *string           `json:"lastServedAt,omitempty"`
+	CreatedAt      string            `json:"createdAt"`
 }
 
 // DeviceInfo represents device firmware and protocol information in the API payload.
@@ -341,6 +374,282 @@ func (s *Server) handleGetInstallation(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(s.toAppPayload(device, app)); err != nil {
 		slog.Error("Failed to encode app JSON", "error", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func parseOverrideKind(raw string) (data.OverrideKind, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(data.OverrideForeground):
+		return data.OverrideForeground, true
+	case string(data.OverridePinned):
+		return data.OverridePinned, true
+	case string(data.OverrideInterstitial):
+		return data.OverrideInterstitial, true
+	default:
+		return "", false
+	}
+}
+
+func (s *Server) toOverridePayload(ov *data.DeviceOverride) OverridePayload {
+	var startsAt *string
+	if ov.StartsAt != nil {
+		iso := ov.StartsAt.Format(time.RFC3339)
+		startsAt = &iso
+	}
+
+	var endsAt *string
+	if ov.EndsAt != nil {
+		iso := ov.EndsAt.Format(time.RFC3339)
+		endsAt = &iso
+	}
+
+	var lastServedAt *string
+	if ov.LastServedAt != nil {
+		iso := ov.LastServedAt.Format(time.RFC3339)
+		lastServedAt = &iso
+	}
+
+	createdAt := ov.CreatedAt.Format(time.RFC3339)
+
+	return OverridePayload{
+		ID:             ov.ID,
+		Kind:           ov.Kind,
+		Priority:       ov.Priority,
+		StartsAt:       startsAt,
+		EndsAt:         endsAt,
+		RemainingShows: ov.RemainingShows,
+		DisplayTimeSec: ov.DisplayTimeSec,
+		GroupID:        ov.GroupID,
+		LastServedAt:   lastServedAt,
+		CreatedAt:      createdAt,
+	}
+}
+
+func (s *Server) handleListOverrides(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+
+	s.cleanupExpiredOverrides(r.Context(), device.ID)
+
+	now := time.Now()
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("device_id = ?", device.ID).
+		Where("(starts_at IS NULL OR starts_at <= ?)", now).
+		Where("(ends_at IS NULL OR ends_at > ?)", now).
+		Where("(remaining_shows IS NULL OR remaining_shows > 0)").
+		Order("priority DESC, created_at DESC").
+		Find(r.Context())
+	if err != nil {
+		http.Error(w, "Failed to list overrides", http.StatusInternalServerError)
+		return
+	}
+
+	payloads := make([]OverridePayload, 0, len(overrides))
+	for i := range overrides {
+		payloads = append(payloads, s.toOverridePayload(&overrides[i]))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"overrides": payloads}); err != nil {
+		slog.Error("Failed to encode overrides JSON", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+
+	var req OverrideCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(req.Image) == "" {
+		http.Error(w, "Missing image", http.StatusBadRequest)
+		return
+	}
+
+	imageStr := req.Image
+	if strings.HasPrefix(strings.ToLower(imageStr), "data:") {
+		if idx := strings.Index(imageStr, ","); idx >= 0 {
+			imageStr = imageStr[idx+1:]
+		}
+	}
+
+	imgBytes, err := base64.StdEncoding.DecodeString(imageStr)
+	if err != nil || len(imgBytes) == 0 {
+		http.Error(w, "Invalid Base64 Image", http.StatusBadRequest)
+		return
+	}
+
+	priority := 0
+	if req.Priority != nil {
+		priority = *req.Priority
+	}
+
+	phases := req.Phases
+	phased := len(phases) > 0
+
+	if !phased {
+		if strings.TrimSpace(req.Kind) == "" {
+			http.Error(w, "Missing override kind", http.StatusBadRequest)
+			return
+		}
+		phases = []OverridePhase{{
+			Kind:           req.Kind,
+			DurationSec:    0,
+			DisplayTimeSec: req.DisplayTimeSec,
+			Shows:          req.Shows,
+		}}
+	}
+
+	groupID := ""
+	if len(phases) > 1 {
+		id, err := generateSecureToken(8)
+		if err != nil {
+			http.Error(w, "Failed to generate group ID", http.StatusInternalServerError)
+			return
+		}
+		groupID = id
+	}
+
+	now := time.Now()
+	start := now
+	created := make([]data.DeviceOverride, 0, len(phases))
+	cleanup := func() {
+		for i := range created {
+			s.deleteOverride(r.Context(), &created[i])
+		}
+	}
+
+	for _, phase := range phases {
+		kind, ok := parseOverrideKind(phase.Kind)
+		if !ok {
+			cleanup()
+			http.Error(w, "Invalid override kind", http.StatusBadRequest)
+			return
+		}
+
+		durationSec := phase.DurationSec
+		if durationSec == 0 && req.DurationSec != nil {
+			durationSec = *req.DurationSec
+		}
+		if phased && durationSec <= 0 {
+			cleanup()
+			http.Error(w, "Duration required for phased overrides", http.StatusBadRequest)
+			return
+		}
+		if durationSec < 0 {
+			cleanup()
+			http.Error(w, "Duration must be >= 0", http.StatusBadRequest)
+			return
+		}
+
+		displayTime := phase.DisplayTimeSec
+		if displayTime == nil {
+			displayTime = req.DisplayTimeSec
+		}
+
+		var remainingShows *int
+		if kind == data.OverrideForeground {
+			shows := phase.Shows
+			if shows == nil {
+				shows = req.Shows
+			}
+			if shows == nil {
+				defaultShows := 1
+				shows = &defaultShows
+			}
+			if *shows <= 0 {
+				cleanup()
+				http.Error(w, "Shows must be > 0", http.StatusBadRequest)
+				return
+			}
+			remainingShows = shows
+		}
+
+		overrideID, err := generateSecureToken(12)
+		if err != nil {
+			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
+			return
+		}
+
+		phaseStart := start
+		var endsAt *time.Time
+		if durationSec > 0 {
+			end := phaseStart.Add(time.Duration(durationSec) * time.Second)
+			endsAt = &end
+		}
+
+		ov := data.DeviceOverride{
+			ID:             overrideID,
+			DeviceID:       device.ID,
+			Kind:           kind,
+			Priority:       priority,
+			StartsAt:       &phaseStart,
+			EndsAt:         endsAt,
+			RemainingShows: remainingShows,
+			DisplayTimeSec: displayTime,
+			ImageKey:       overrideID,
+		}
+		if groupID != "" {
+			ov.GroupID = &groupID
+		}
+
+		if err := gorm.G[data.DeviceOverride](s.DB).Create(r.Context(), &ov); err != nil {
+			cleanup()
+			http.Error(w, "Failed to create override", http.StatusInternalServerError)
+			return
+		}
+
+		if err := s.saveOverrideImage(device.ID, overrideID, imgBytes); err != nil {
+			slog.Error("Failed to save override image", "override_id", overrideID, "error", err)
+			s.deleteOverride(r.Context(), &ov)
+			cleanup()
+			http.Error(w, "Failed to save override image", http.StatusInternalServerError)
+			return
+		}
+
+		created = append(created, ov)
+
+		if endsAt != nil {
+			start = *endsAt
+		}
+	}
+
+	payloads := make([]OverridePayload, 0, len(created))
+	for i := range created {
+		payloads = append(payloads, s.toOverridePayload(&created[i]))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"overrides": payloads}); err != nil {
+		slog.Error("Failed to encode overrides JSON", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleDeleteOverride(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	overrideID := r.PathValue("overrideId")
+	if overrideID == "" {
+		http.Error(w, "Override not found", http.StatusNotFound)
+		return
+	}
+
+	ov, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("id = ? AND device_id = ?", overrideID, device.ID).
+		First(r.Context())
+	if err != nil {
+		http.Error(w, "Override not found", http.StatusNotFound)
+		return
+	}
+
+	s.deleteOverride(r.Context(), &ov)
+
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("Override deleted.")); err != nil {
+		slog.Error("Failed to write response", "error", err)
 	}
 }
 
@@ -742,6 +1051,9 @@ func (s *Server) SetupAPIRoutes() {
 	s.Router.Handle("POST /v0/devices/{id}/push_app", s.APIAuthMiddleware(s.RequireDevice(s.handlePushApp)))
 	s.Router.Handle("POST /v0/devices/{id}/update_firmware_settings", s.APIAuthMiddleware(s.RequireDevice(s.handleUpdateFirmwareSettingsAPI)))
 	s.Router.Handle("POST /v0/devices/{id}/reboot", s.APIAuthMiddleware(s.RequireDevice(s.handleRebootDeviceAPI)))
+	s.Router.Handle("GET /v0/devices/{id}/overrides", s.APIAuthMiddleware(s.RequireDevice(s.handleListOverrides)))
+	s.Router.Handle("POST /v0/devices/{id}/overrides", s.APIAuthMiddleware(s.RequireDevice(s.handleCreateOverride)))
+	s.Router.Handle("DELETE /v0/devices/{id}/overrides/{overrideId}", s.APIAuthMiddleware(s.RequireDevice(s.handleDeleteOverride)))
 	s.Router.Handle("GET /v0/devices/{id}/installations", s.APIAuthMiddleware(s.RequireDevice(s.handleListInstallations)))
 	s.Router.Handle("GET /v0/devices/{id}/installations/{iname}", s.APIAuthMiddleware(s.RequireDevice(s.handleGetInstallation)))
 	s.Router.Handle("PATCH /v0/devices/{id}", s.APIAuthMiddleware(s.RequireDevice(s.handlePatchDevice)))

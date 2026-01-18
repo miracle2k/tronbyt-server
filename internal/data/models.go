@@ -547,6 +547,29 @@ type App struct {
 	ColorFilter     *ColorFilter `json:"color_filter"`
 }
 
+type OverrideKind string
+
+const (
+	OverrideForeground   OverrideKind = "foreground"
+	OverridePinned       OverrideKind = "pinned"
+	OverrideInterstitial OverrideKind = "interstitial"
+)
+
+type DeviceOverride struct {
+	ID             string       `gorm:"primaryKey" json:"id"`
+	DeviceID       string       `gorm:"index" json:"device_id"`
+	Kind           OverrideKind `gorm:"type:text" json:"kind"`
+	Priority       int          `json:"priority"`
+	StartsAt       *time.Time   `json:"starts_at"`
+	EndsAt         *time.Time   `json:"ends_at"`
+	RemainingShows *int         `json:"remaining_shows"`
+	DisplayTimeSec *int         `json:"display_time_sec"`
+	ImageKey       string       `json:"image_key"`
+	GroupID        *string      `json:"group_id"`
+	LastServedAt   *time.Time   `json:"last_served_at"`
+	CreatedAt      time.Time    `json:"created_at"`
+}
+
 type Device struct {
 	ID                    string      `gorm:"primaryKey"              json:"id"` // 8-char hex
 	Username              string      `gorm:"index"                   json:"username"`

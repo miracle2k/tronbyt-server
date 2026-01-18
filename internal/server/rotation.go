@@ -43,23 +43,71 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 		return data, nil, nil
 	}
 
-	// 2. Apps Check
-	if len(device.Apps) == 0 {
-		slog.Debug("No apps on device, returning default image", "device", device.ID)
-		return getDefaultImage()
-	}
-
-	// 3. Brightness Check
+	// 2. Brightness Check
 	if device.GetEffectiveBrightness() == 0 {
 		slog.Debug("Brightness is 0, returning default image")
 		return getDefaultImage()
 	}
 
-	// 4. Rotation Logic
-	app, nextIndex, err := s.determineNextApp(ctx, device, user)
-	if err != nil || app == nil {
+	// 3. Override Logic (Foreground / Pinned)
+	s.cleanupExpiredOverrides(ctx, device.ID)
+	minPriority := minOverridePriority(device)
+
+	if img, ov, err := s.getOverrideImage(ctx, device.ID, data.OverrideForeground, minPriority); err != nil {
+		slog.Error("Failed to get foreground override image", "device", device.ID, "error", err)
+	} else if ov != nil && len(img) > 0 {
+		return s.handleOverrideImage(ctx, device, user, img, ov, false)
+	}
+
+	if img, ov, err := s.getOverrideImage(ctx, device.ID, data.OverridePinned, minPriority); err != nil {
+		slog.Error("Failed to get pinned override image", "device", device.ID, "error", err)
+	} else if ov != nil && len(img) > 0 {
+		return s.handleOverrideImage(ctx, device, user, img, ov, false)
+	}
+
+	// 4. Apps Check (after overrides so empty devices can still show overrides)
+	if len(device.Apps) == 0 {
+		slog.Debug("No apps on device, returning default image", "device", device.ID)
+		return getDefaultImage()
+	}
+
+	// 5. Rotation Logic (with optional interstitial override)
+	interstitialOverride, err := s.peekOverride(ctx, device.ID, data.OverrideInterstitial, minPriority)
+	if err != nil {
+		slog.Error("Failed to get interstitial override", "device", device.ID, "error", err)
+	}
+
+	app, selectedOverride, nextIndex, err := s.determineNextApp(ctx, device, user, interstitialOverride)
+	if err != nil || (app == nil && selectedOverride == nil) {
 		slog.Debug("No valid app found (e.g. all disabled or scheduled out), returning default image", "device", device.ID, "error", err)
 		return getDefaultImage()
+	}
+
+	if selectedOverride != nil {
+		imageKey := selectedOverride.ImageKey
+		if imageKey == "" {
+			imageKey = selectedOverride.ID
+		}
+		img, err := s.readOverrideImage(device.ID, imageKey)
+		if err != nil {
+			slog.Warn("Failed to read interstitial override image, removing override", "override_id", selectedOverride.ID, "error", err)
+			s.deleteOverride(ctx, selectedOverride)
+			// Retry without interstitial override
+			app, _, nextIndex, err = s.determineNextApp(ctx, device, user, nil)
+			if err != nil || app == nil {
+				slog.Debug("No valid app found after removing override, returning default image", "device", device.ID, "error", err)
+				return getDefaultImage()
+			}
+		} else {
+			deleteAfter, err := s.markOverrideServed(ctx, selectedOverride)
+			if err != nil {
+				slog.Error("Failed to update interstitial override state", "override_id", selectedOverride.ID, "error", err)
+			}
+			if deleteAfter {
+				s.deleteOverrideFile(device.ID, imageKey)
+			}
+			return s.handleOverrideImage(ctx, device, user, img, selectedOverride, true, nextIndex)
+		}
 	}
 
 	// 5. Save State
@@ -113,6 +161,41 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 	return data, app, err
 }
 
+func (s *Server) handleOverrideImage(ctx context.Context, device *data.Device, user *data.User, img []byte, ov *data.DeviceOverride, advanceIndex bool, nextIndex ...int) ([]byte, *data.App, error) {
+	// Update LastSeen (and LastAppIndex if advanceIndex)
+	now := time.Now()
+	deviceUpdates := data.Device{
+		LastSeen: &now,
+	}
+
+	q := gorm.G[data.Device](s.DB).Where("id = ?", device.ID)
+	if advanceIndex && len(nextIndex) > 0 && nextIndex[0] != device.LastAppIndex {
+		deviceUpdates.LastAppIndex = nextIndex[0]
+		q = q.Select("LastSeen", "LastAppIndex")
+		device.LastAppIndex = nextIndex[0]
+	} else {
+		q = q.Select("LastSeen")
+	}
+
+	if _, err := q.Updates(ctx, deviceUpdates); err != nil {
+		slog.Error("Failed to update device state for override", "error", err)
+	} else {
+		device.LastSeen = &now
+	}
+
+	// Notify Dashboard that the device has updated (new app or new render)
+	if user != nil && device.Info.ProtocolType != data.ProtocolWS {
+		s.notifyDashboard(user.Username, WSEvent{Type: "image_updated", DeviceID: device.ID})
+	}
+
+	overrideApp := &data.App{}
+	if ov != nil {
+		overrideApp.DisplayTime = s.overrideDisplayTime(ov)
+	}
+
+	return img, overrideApp, nil
+}
+
 func (s *Server) GetCurrentAppImage(ctx context.Context, device *data.Device) ([]byte, *data.App, error) {
 	// Re-fetch device with Apps if missing
 	if len(device.Apps) == 0 {
@@ -157,7 +240,8 @@ func (s *Server) GetCurrentAppImage(ctx context.Context, device *data.Device) ([
 	sort.Slice(apps, func(i, j int) bool {
 		return apps[i].Order < apps[j].Order
 	})
-	expanded := createExpandedAppsList(device, apps)
+	interstitialApp := resolveInterstitialApp(device, apps)
+	expanded := createExpandedAppsList(device, apps, device.InterstitialEnabled, interstitialApp)
 
 	if len(expanded) == 0 {
 		return nil, nil, fmt.Errorf("no apps")
@@ -185,7 +269,7 @@ func (s *Server) GetCurrentAppImage(ctx context.Context, device *data.Device) ([
 	return data, app, err
 }
 
-func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user *data.User) (*data.App, int, error) {
+func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user *data.User, interstitialOverride *data.DeviceOverride) (*data.App, *data.DeviceOverride, int, error) {
 	// 1. Night Mode Logic (Highest Priority)
 	nightModeActive := device.GetNightModeIsActive()
 	if nightModeActive && device.NightModeApp != "" {
@@ -195,7 +279,7 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 				app := &device.Apps[i]
 				// Found Night Mode app, check if it's renderable before returning
 				if s.possiblyRender(ctx, app, device, user) && !app.EmptyLastRender {
-					return app, device.LastAppIndex, nil
+					return app, nil, device.LastAppIndex, nil
 				}
 				slog.Warn("Night Mode App failed to render, falling back", "app", nightIname, "device", device.ID)
 				break // Stop looking for night app and fall through
@@ -213,7 +297,7 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 				app := &device.Apps[i]
 				// Found pinned app, check renderability
 				if s.possiblyRender(ctx, app, device, user) && !app.EmptyLastRender {
-					return app, device.LastAppIndex, nil
+					return app, nil, device.LastAppIndex, nil
 				}
 				slog.Warn("Pinned App failed to render, falling back", "app", pinnedIname, "device", device.ID)
 				break // Found but failed, fall through to normal rotation without unpinning
@@ -238,11 +322,25 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 		return apps[i].Order < apps[j].Order
 	})
 
-	// Create Expanded List (with Interstitials)
-	expanded := createExpandedAppsList(device, apps)
+	// Create Expanded List (with Interstitials or Interstitial Override)
+	interstitialEnabled := device.InterstitialEnabled
+	interstitialApp := resolveInterstitialApp(device, apps)
+	if interstitialOverride != nil {
+		interstitialEnabled = true
+		placeholder := data.App{
+			Name:   "override",
+			Pushed: true,
+		}
+		if interstitialOverride.DisplayTimeSec != nil {
+			placeholder.DisplayTime = *interstitialOverride.DisplayTimeSec
+		}
+		interstitialApp = &placeholder
+	}
+
+	expanded := createExpandedAppsList(device, apps, interstitialEnabled, interstitialApp)
 
 	if len(expanded) == 0 {
-		return nil, 0, nil
+		return nil, nil, 0, nil
 	}
 
 	lastIndex := device.LastAppIndex
@@ -253,7 +351,7 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 
 		candidate := expanded[nextIndex]
 
-		isInterstitialPos := device.InterstitialEnabled && nextIndex%2 == 1
+		isInterstitialPos := interstitialEnabled && nextIndex%2 == 1
 
 		shouldDisplay := false
 		if isInterstitialPos {
@@ -279,34 +377,37 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 		}
 
 		if shouldDisplay {
+			if isInterstitialPos && interstitialOverride != nil {
+				return nil, interstitialOverride, nextIndex, nil
+			}
 			if s.possiblyRender(ctx, &candidate, device, user) && !candidate.EmptyLastRender {
-				return &candidate, nextIndex, nil
+				return &candidate, nil, nextIndex, nil
 			}
 		}
 
 		lastIndex = nextIndex
 	}
 
-	return nil, 0, nil
+	return nil, nil, 0, nil
 }
 
-func createExpandedAppsList(device *data.Device, apps []data.App) []data.App {
-	if !device.InterstitialEnabled || device.InterstitialApp == nil {
-		return apps
+func resolveInterstitialApp(device *data.Device, apps []data.App) *data.App {
+	if device == nil || !device.InterstitialEnabled || device.InterstitialApp == nil {
+		return nil
 	}
 
 	interstitialIname := *device.InterstitialApp
-	var interstitialApp *data.App
-
-	// Find interstitial app object
 	for i := range apps {
 		if apps[i].Iname == interstitialIname {
-			interstitialApp = &apps[i]
-			break
+			return &apps[i]
 		}
 	}
 
-	if interstitialApp == nil {
+	return nil
+}
+
+func createExpandedAppsList(device *data.Device, apps []data.App, interstitialEnabled bool, interstitialApp *data.App) []data.App {
+	if !interstitialEnabled || interstitialApp == nil {
 		return apps
 	}
 

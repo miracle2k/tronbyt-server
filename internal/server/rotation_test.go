@@ -73,7 +73,7 @@ func TestDetermineNextApp_NightMode(t *testing.T) {
 	d.LastAppIndex = -1
 
 	for i := range 10 {
-		app, nextIndex, err := s.determineNextApp(ctx, &d, &user)
+		app, _, nextIndex, err := s.determineNextApp(ctx, &d, &user, nil)
 		if err != nil {
 			t.Fatalf("determineNextApp failed: %v", err)
 		}
@@ -136,7 +136,7 @@ func TestDetermineNextApp_NightMode_NoAppSelected(t *testing.T) {
 	d.LastAppIndex = -1
 
 	// Should return the regular app
-	app, _, err := s.determineNextApp(ctx, &d, &user)
+	app, _, _, err := s.determineNextApp(ctx, &d, &user, nil)
 	if err != nil {
 		t.Fatalf("determineNextApp failed: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestDetermineNextApp_NightModePrecedence(t *testing.T) {
 	}
 
 	// 1. Verify Night Mode wins when active
-	app, _, err := s.determineNextApp(ctx, &d, &user)
+	app, _, _, err := s.determineNextApp(ctx, &d, &user, nil)
 	if err != nil {
 		t.Fatalf("determineNextApp failed: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestDetermineNextApp_NightModePrecedence(t *testing.T) {
 
 	// 2. Verify Pinned App wins when Night Mode is inactive
 	d.NightModeEnabled = false
-	app, _, err = s.determineNextApp(ctx, &d, &user)
+	app, _, _, err = s.determineNextApp(ctx, &d, &user, nil)
 	if err != nil {
 		t.Fatalf("determineNextApp failed (night mode disabled): %v", err)
 	}
@@ -285,7 +285,7 @@ func TestDetermineNextApp_Pinning(t *testing.T) {
 	// 1. Verify Sticky Pinning
 	// It should return app-2 multiple times, regardless of "rotation"
 	for i := range 5 {
-		app, nextIndex, err := s.determineNextApp(ctx, &d, &user)
+		app, _, nextIndex, err := s.determineNextApp(ctx, &d, &user, nil)
 		if err != nil {
 			t.Fatalf("determineNextApp failed: %v", err)
 		}
@@ -310,7 +310,7 @@ func TestDetermineNextApp_Pinning(t *testing.T) {
 		t.Fatalf("failed to update device: %v", err)
 	}
 
-	app, _, err := s.determineNextApp(ctx, &d, &user)
+	app, _, _, err := s.determineNextApp(ctx, &d, &user, nil)
 	if err != nil {
 		t.Fatalf("determineNextApp failed with missing pin: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestDetermineNextApp_AutoPin(t *testing.T) {
 
 	// 1. Successful Render -> Auto Pin
 	// Pushed=true bypasses rendering and success is assumed.
-	_, _, err = s.determineNextApp(ctx, &d, &user)
+	_, _, _, err = s.determineNextApp(ctx, &d, &user, nil)
 	if err != nil {
 		t.Fatalf("determineNextApp failed: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestDetermineNextApp_AutoPin(t *testing.T) {
 
 	// determineNextApp will call possiblyRender for the pinned app.
 	// We expect it to fail (EmptyLastRender=true) and then unpin.
-	_, _, err = s.determineNextApp(ctx, &d, &user)
+	_, _, _, err = s.determineNextApp(ctx, &d, &user, nil)
 	if err != nil {
 		t.Fatalf("determineNextApp failed on unpin cycle: %v", err)
 	}
@@ -439,5 +439,97 @@ func TestDetermineNextApp_AutoPin(t *testing.T) {
 	}
 	if dbDevice.PinnedApp != nil {
 		t.Error("Auto-unpin not reflected in DB")
+	}
+}
+
+func TestDetermineNextApp_InterstitialOverride(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "testuser_interstitial_override"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	device := data.Device{
+		ID:           "device_interstitial_override",
+		Username:     user.Username,
+		LastAppIndex: -1,
+	}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	app1 := data.App{
+		DeviceID: device.ID,
+		Iname:    "app-1",
+		Name:     "App 1",
+		Enabled:  true,
+		Pushed:   true,
+		Order:    1,
+	}
+	if err := gorm.G[data.App](s.DB).Create(ctx, &app1); err != nil {
+		t.Fatalf("failed to create app 1: %v", err)
+	}
+
+	app2 := data.App{
+		DeviceID: device.ID,
+		Iname:    "app-2",
+		Name:     "App 2",
+		Enabled:  true,
+		Pushed:   true,
+		Order:    2,
+	}
+	if err := gorm.G[data.App](s.DB).Create(ctx, &app2); err != nil {
+		t.Fatalf("failed to create app 2: %v", err)
+	}
+
+	d, err := gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", device.ID).First(ctx)
+	if err != nil {
+		t.Fatalf("failed to reload device with apps: %v", err)
+	}
+
+	override := &data.DeviceOverride{
+		ID:             "override-1",
+		Kind:           data.OverrideInterstitial,
+		DisplayTimeSec: intPtr(7),
+	}
+
+	// First app
+	app, ov, nextIndex, err := s.determineNextApp(ctx, &d, &user, override)
+	if err != nil {
+		t.Fatalf("determineNextApp failed: %v", err)
+	}
+	if ov != nil {
+		t.Fatalf("expected regular app first, got override")
+	}
+	if app == nil || app.Iname != "app-1" {
+		t.Fatalf("expected app-1, got %v", app)
+	}
+	d.LastAppIndex = nextIndex
+
+	// Interstitial override
+	app, ov, nextIndex, err = s.determineNextApp(ctx, &d, &user, override)
+	if err != nil {
+		t.Fatalf("determineNextApp failed: %v", err)
+	}
+	if ov == nil {
+		t.Fatalf("expected interstitial override, got nil")
+	}
+	if app != nil {
+		t.Fatalf("expected no app when override selected, got %v", app.Iname)
+	}
+	d.LastAppIndex = nextIndex
+
+	// Next app
+	app, ov, _, err = s.determineNextApp(ctx, &d, &user, override)
+	if err != nil {
+		t.Fatalf("determineNextApp failed: %v", err)
+	}
+	if ov != nil {
+		t.Fatalf("expected regular app, got override")
+	}
+	if app == nil || app.Iname != "app-2" {
+		t.Fatalf("expected app-2, got %v", app)
 	}
 }
