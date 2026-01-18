@@ -1,0 +1,224 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"time"
+
+	"tronbyt-server/internal/data"
+
+	securejoin "github.com/cyphar/filepath-securejoin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+const nightModeOverridePriority = 100
+
+func (s *Server) overridesDir(deviceID string) (string, error) {
+	deviceWebpDir, err := s.ensureDeviceImageDir(deviceID)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(deviceWebpDir, "overrides")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func (s *Server) overrideImagePath(deviceID, imageKey string) (string, error) {
+	dir, err := s.overridesDir(deviceID)
+	if err != nil {
+		return "", err
+	}
+	filename := imageKey + ".webp"
+	return securejoin.SecureJoin(dir, filename)
+}
+
+func (s *Server) saveOverrideImage(deviceID, overrideID string, data []byte) error {
+	path, err := s.overrideImagePath(deviceID, overrideID)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func (s *Server) readOverrideImage(deviceID, imageKey string) ([]byte, error) {
+	path, err := s.overrideImagePath(deviceID, imageKey)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+}
+
+func (s *Server) deleteOverrideFile(deviceID, imageKey string) {
+	if imageKey == "" {
+		return
+	}
+	path, err := s.overrideImagePath(deviceID, imageKey)
+	if err != nil {
+		slog.Warn("Failed to resolve override image path for delete", "error", err)
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.Warn("Failed to delete override image file", "path", path, "error", err)
+	}
+}
+
+func (s *Server) deleteOverride(ctx context.Context, ov *data.DeviceOverride) {
+	if ov == nil {
+		return
+	}
+	if _, err := gorm.G[data.DeviceOverride](s.DB).Where("id = ?", ov.ID).Delete(ctx); err != nil {
+		slog.Warn("Failed to delete override record", "override_id", ov.ID, "error", err)
+		return
+	}
+	imageKey := ov.ImageKey
+	if imageKey == "" {
+		imageKey = ov.ID
+	}
+	s.deleteOverrideFile(ov.DeviceID, imageKey)
+}
+
+func (s *Server) cleanupExpiredOverrides(ctx context.Context, deviceID string) {
+	now := time.Now()
+	expired, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("device_id = ? AND ((ends_at IS NOT NULL AND ends_at <= ?) OR (remaining_shows IS NOT NULL AND remaining_shows <= 0))", deviceID, now).
+		Find(ctx)
+	if err != nil {
+		slog.Warn("Failed to query expired overrides", "device_id", deviceID, "error", err)
+		return
+	}
+	for i := range expired {
+		s.deleteOverride(ctx, &expired[i])
+	}
+}
+
+func (s *Server) findActiveOverride(ctx context.Context, deviceID string, kind data.OverrideKind, minPriority int) (*data.DeviceOverride, error) {
+	now := time.Now()
+	q := gorm.G[data.DeviceOverride](s.DB).
+		Where("device_id = ? AND kind = ?", deviceID, kind).
+		Where("(starts_at IS NULL OR starts_at <= ?)", now).
+		Where("(ends_at IS NULL OR ends_at > ?)", now).
+		Where("(remaining_shows IS NULL OR remaining_shows > 0)").
+		Order("priority DESC, created_at DESC")
+
+	if minPriority > 0 {
+		q = q.Where("priority >= ?", minPriority)
+	}
+
+	ov, err := q.First(ctx)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &ov, nil
+}
+
+func (s *Server) markOverrideServed(ctx context.Context, ov *data.DeviceOverride) (bool, error) {
+	if ov == nil {
+		return false, nil
+	}
+	now := time.Now()
+	deleteAfter := false
+
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		current, err := gorm.G[data.DeviceOverride](tx, clause.Locking{Strength: "UPDATE"}).Where("id = ?", ov.ID).First(ctx)
+		if err != nil {
+			return err
+		}
+
+		if current.RemainingShows != nil {
+			remaining := *current.RemainingShows
+			if remaining <= 1 {
+				if _, err := gorm.G[data.DeviceOverride](tx).Where("id = ?", current.ID).Delete(ctx); err != nil {
+					return err
+				}
+				deleteAfter = true
+				return nil
+			}
+
+			newVal := remaining - 1
+			updates := data.DeviceOverride{
+				RemainingShows: &newVal,
+				LastServedAt:   &now,
+			}
+			_, err := gorm.G[data.DeviceOverride](tx).Where("id = ?", current.ID).Select("remaining_shows", "last_served_at").Updates(ctx, updates)
+			return err
+		}
+
+		updates := data.DeviceOverride{
+			LastServedAt: &now,
+		}
+		_, err = gorm.G[data.DeviceOverride](tx).Where("id = ?", current.ID).Select("last_served_at").Updates(ctx, updates)
+		return err
+	})
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	return deleteAfter, nil
+}
+
+func (s *Server) getOverrideImage(ctx context.Context, deviceID string, kind data.OverrideKind, minPriority int) ([]byte, *data.DeviceOverride, error) {
+	for i := 0; i < 3; i++ {
+		ov, err := s.findActiveOverride(ctx, deviceID, kind, minPriority)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ov == nil {
+			return nil, nil, nil
+		}
+
+		imageKey := ov.ImageKey
+		if imageKey == "" {
+			imageKey = ov.ID
+		}
+
+		img, err := s.readOverrideImage(deviceID, imageKey)
+		if err != nil {
+			slog.Warn("Override image missing, removing override", "override_id", ov.ID, "error", err)
+			s.deleteOverride(ctx, ov)
+			continue
+		}
+
+		deleteAfter, err := s.markOverrideServed(ctx, ov)
+		if err != nil {
+			return nil, nil, err
+		}
+		if deleteAfter {
+			s.deleteOverrideFile(deviceID, imageKey)
+		}
+
+		return img, ov, nil
+	}
+
+	return nil, nil, nil
+}
+
+func (s *Server) peekOverride(ctx context.Context, deviceID string, kind data.OverrideKind, minPriority int) (*data.DeviceOverride, error) {
+	return s.findActiveOverride(ctx, deviceID, kind, minPriority)
+}
+
+func (s *Server) overrideDisplayTime(ov *data.DeviceOverride) int {
+	if ov != nil && ov.DisplayTimeSec != nil && *ov.DisplayTimeSec > 0 {
+		return *ov.DisplayTimeSec
+	}
+	return 0
+}
+
+func minOverridePriority(device *data.Device) int {
+	if device != nil && device.GetNightModeIsActive() {
+		return nightModeOverridePriority
+	}
+	return 0
+}

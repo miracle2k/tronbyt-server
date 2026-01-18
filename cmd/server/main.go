@@ -278,7 +278,7 @@ func main() {
 	sanitizeDB(db)
 
 	// AutoMigrate (ensure schema exists)
-	if err := db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.WebAuthnCredential{}, &data.Setting{}); err != nil {
+	if err := db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.DeviceOverride{}, &data.WebAuthnCredential{}, &data.Setting{}); err != nil {
 		slog.Error("Failed to migrate schema", "error", err)
 		os.Exit(1)
 	}
