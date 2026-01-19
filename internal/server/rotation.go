@@ -321,6 +321,9 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 	interstitialEnabled := device.InterstitialEnabled
 	interstitialApp := resolveInterstitialApp(device, apps)
 	useOverrideInterstitial := len(interstitialOverrides) > 0
+	// Pragmatic guard: we don't have a dedicated "last override served" field,
+	// so we treat LastServedAt == device.LastSeen as "an override was just served"
+	// to avoid back-to-back interstitial overrides without an app in between.
 	justServedOverride := false
 	if useOverrideInterstitial {
 		justServedOverride = overrideServedAtLastSeen(interstitialOverrides, device.LastSeen)
