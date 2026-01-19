@@ -572,7 +572,9 @@ type DeviceOverride struct {
 
 type DeviceNotification struct {
 	ID                string     `gorm:"primaryKey" json:"id"`
-	DeviceID          string     `gorm:"index" json:"device_id"`
+	DeviceID          string     `gorm:"index;index:uniq_device_notif_key,unique" json:"device_id"`
+	Source            *string    `gorm:"index:uniq_device_notif_key,unique" json:"source"`
+	Key               *string    `gorm:"index:uniq_device_notif_key,unique" json:"key"`
 	Priority          int        `json:"priority"`
 	PinUntil          *time.Time `json:"pin_until"`
 	InterstitialUntil *time.Time `json:"interstitial_until"`

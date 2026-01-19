@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -101,6 +102,8 @@ type NotificationCreateRequest struct {
 	Priority           *int   `json:"priority"`
 	PinForSec          *int   `json:"pinForSec"`
 	InterstitialForSec *int   `json:"interstitialForSec"`
+	Source             string `json:"source"`
+	Key                string `json:"key"`
 	Title              string `json:"title"`
 	Subtitle           string `json:"subtitle"`
 	Subtitle2          string `json:"subtitle2"`
@@ -110,6 +113,8 @@ type NotificationCreateRequest struct {
 
 type NotificationPayload struct {
 	ID                string  `json:"id"`
+	Source            *string `json:"source,omitempty"`
+	Key               *string `json:"key,omitempty"`
 	Priority          int     `json:"priority"`
 	PinUntil          *string `json:"pinUntil,omitempty"`
 	InterstitialUntil *string `json:"interstitialUntil,omitempty"`
@@ -453,6 +458,8 @@ func (s *Server) toNotificationPayload(n *data.DeviceNotification) NotificationP
 
 	return NotificationPayload{
 		ID:                n.ID,
+		Source:            n.Source,
+		Key:               n.Key,
 		Priority:          n.Priority,
 		PinUntil:          pinUntil,
 		InterstitialUntil: interstitialUntil,
@@ -671,9 +678,22 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 	trimSubtitle2 := strings.TrimSpace(req.Subtitle2)
 	trimIcon := strings.TrimSpace(req.Icon)
 	trimImage := strings.TrimSpace(req.Image)
+	trimSource := strings.TrimSpace(req.Source)
+	trimKey := strings.TrimSpace(req.Key)
 
 	hasText := trimTitle != ""
 	hasImage := trimImage != ""
+	hasKey := trimSource != "" || trimKey != ""
+
+	var sourcePtr, keyPtr *string
+	if hasKey {
+		if trimSource == "" || trimKey == "" {
+			http.Error(w, "Both source and key are required when using a notification key", http.StatusBadRequest)
+			return
+		}
+		sourcePtr = &trimSource
+		keyPtr = &trimKey
+	}
 
 	if !hasText && (trimSubtitle != "" || trimSubtitle2 != "" || trimIcon != "") {
 		http.Error(w, "Title is required for text notifications", http.StatusBadRequest)
@@ -686,6 +706,19 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 	if !hasText && !hasImage {
 		http.Error(w, "Missing image or title", http.StatusBadRequest)
 		return
+	}
+
+	var existingNotification *data.DeviceNotification
+	if sourcePtr != nil {
+		existing, err := gorm.G[data.DeviceNotification](s.DB).
+			Where("device_id = ? AND source = ? AND `key` = ?", device.ID, *sourcePtr, *keyPtr).
+			First(r.Context())
+		if err == nil {
+			existingNotification = &existing
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "Failed to check existing notifications", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	decodeBase64Payload := func(raw string) ([]byte, error) {
@@ -786,11 +819,17 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 	notification := data.DeviceNotification{
 		ID:                notificationID,
 		DeviceID:          device.ID,
+		Source:            sourcePtr,
+		Key:               keyPtr,
 		Priority:          priority,
 		PinUntil:          pinUntil,
 		InterstitialUntil: interstitialUntil,
 		EndsAt:            endsAt,
 		CreatedAt:         now,
+	}
+
+	if existingNotification != nil {
+		s.deleteNotification(r.Context(), existingNotification)
 	}
 
 	if err := gorm.G[data.DeviceNotification](s.DB).Create(r.Context(), &notification); err != nil {
@@ -877,6 +916,31 @@ func (s *Server) handleDeleteNotification(w http.ResponseWriter, r *http.Request
 
 	notification, err := gorm.G[data.DeviceNotification](s.DB).
 		Where("id = ? AND device_id = ?", notificationID, device.ID).
+		First(r.Context())
+	if err != nil {
+		http.Error(w, "Notification not found", http.StatusNotFound)
+		return
+	}
+
+	s.deleteNotification(r.Context(), &notification)
+
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("Notification deleted.")); err != nil {
+		slog.Error("Failed to write response", "error", err)
+	}
+}
+
+func (s *Server) handleDeleteNotificationByKey(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if source == "" || key == "" {
+		http.Error(w, "Missing source or key", http.StatusBadRequest)
+		return
+	}
+
+	notification, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("device_id = ? AND source = ? AND `key` = ?", device.ID, source, key).
 		First(r.Context())
 	if err != nil {
 		http.Error(w, "Notification not found", http.StatusNotFound)
@@ -1294,6 +1358,7 @@ func (s *Server) SetupAPIRoutes() {
 	s.Router.Handle("DELETE /v0/devices/{id}/overrides/{overrideId}", s.APIAuthMiddleware(s.RequireDevice(s.handleDeleteOverride)))
 	s.Router.Handle("GET /v0/devices/{id}/notifications", s.APIAuthMiddleware(s.RequireDevice(s.handleListNotifications)))
 	s.Router.Handle("POST /v0/devices/{id}/notifications", s.APIAuthMiddleware(s.RequireDevice(s.handleCreateNotification)))
+	s.Router.Handle("DELETE /v0/devices/{id}/notifications/by-key", s.APIAuthMiddleware(s.RequireDevice(s.handleDeleteNotificationByKey)))
 	s.Router.Handle("DELETE /v0/devices/{id}/notifications/{notificationId}", s.APIAuthMiddleware(s.RequireDevice(s.handleDeleteNotification)))
 	s.Router.Handle("GET /v0/devices/{id}/installations", s.APIAuthMiddleware(s.RequireDevice(s.handleListInstallations)))
 	s.Router.Handle("GET /v0/devices/{id}/installations/{iname}", s.APIAuthMiddleware(s.RequireDevice(s.handleGetInstallation)))

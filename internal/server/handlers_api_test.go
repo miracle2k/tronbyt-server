@@ -1082,6 +1082,128 @@ func TestHandleCreateNotification_Text(t *testing.T) {
 	}
 }
 
+func TestHandleCreateNotification_DedupeKey(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	body, _ := json.Marshal(map[string]any{
+		"pinForSec": 60,
+		"image":     base64.StdEncoding.EncodeToString([]byte("img-1")),
+		"source":    "homeassistant",
+		"key":       "dishwasher_done",
+	})
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Notifications []NotificationPayload `json:"notifications"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(resp.Notifications))
+	}
+	firstID := resp.Notifications[0].ID
+
+	start := time.Now()
+	body2, _ := json.Marshal(map[string]any{
+		"pinForSec": 120,
+		"image":     base64.StdEncoding.EncodeToString([]byte("img-2")),
+		"source":    "homeassistant",
+		"key":       "dishwasher_done",
+	})
+	req2 := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body2)
+	rr2 := httptest.NewRecorder()
+	s.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+
+	count, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("device_id = ?", "testdevice").
+		Count(context.Background(), "*")
+	if err != nil {
+		t.Fatalf("failed to count notifications: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 notification after dedupe, got %d", count)
+	}
+
+	notification, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("device_id = ? AND source = ? AND `key` = ?", "testdevice", "homeassistant", "dishwasher_done").
+		First(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load notification: %v", err)
+	}
+	if notification.PinUntil == nil || notification.PinUntil.Before(start) {
+		t.Fatalf("expected updated pin_until after second request")
+	}
+
+	oldOverrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("managed_by_notif = ?", firstID).
+		Find(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load old overrides: %v", err)
+	}
+	if len(oldOverrides) != 0 {
+		t.Fatalf("expected old overrides to be deleted, got %d", len(oldOverrides))
+	}
+}
+
+func TestHandleDeleteNotification_ByKey(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	body, _ := json.Marshal(map[string]any{
+		"pinForSec": 60,
+		"image":     base64.StdEncoding.EncodeToString([]byte("img-1")),
+		"source":    "homeassistant",
+		"key":       "dishwasher_done",
+	})
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	deleteReq := newAPIRequest(http.MethodDelete, "/v0/devices/testdevice/notifications/by-key?source=homeassistant&key=dishwasher_done", apiKey, nil)
+	deleteResp := httptest.NewRecorder()
+	s.ServeHTTP(deleteResp, deleteReq)
+
+	if deleteResp.Code != http.StatusOK {
+		t.Fatalf("expected delete status 200, got %d: %s", deleteResp.Code, deleteResp.Body.String())
+	}
+
+	count, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("device_id = ?", "testdevice").
+		Count(context.Background(), "*")
+	if err != nil {
+		t.Fatalf("failed to count notifications: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 notifications after delete, got %d", count)
+	}
+
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("device_id = ?", "testdevice").
+		Find(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load overrides: %v", err)
+	}
+	if len(overrides) != 0 {
+		t.Fatalf("expected overrides to be deleted, got %d", len(overrides))
+	}
+}
+
 func TestHandleCreateNotification_Invalid(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "device_api_key"
@@ -1107,6 +1229,22 @@ func TestHandleCreateNotification_Invalid(t *testing.T) {
 			body: map[string]any{
 				"pinForSec": 60,
 				"subtitle":  "No title",
+			},
+		},
+		{
+			name: "source without key",
+			body: map[string]any{
+				"pinForSec": 60,
+				"image":     base64.StdEncoding.EncodeToString([]byte("img")),
+				"source":    "homeassistant",
+			},
+		},
+		{
+			name: "key without source",
+			body: map[string]any{
+				"pinForSec": 60,
+				"image":     base64.StdEncoding.EncodeToString([]byte("img")),
+				"key":       "dishwasher_done",
 			},
 		},
 	}
