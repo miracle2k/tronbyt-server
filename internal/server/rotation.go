@@ -49,15 +49,9 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 		return getDefaultImage()
 	}
 
-	// 3. Override Logic (Foreground / Pinned)
+	// 3. Override Logic (Pinned)
 	s.cleanupExpiredOverrides(ctx, device.ID)
 	minPriority := minOverridePriority(device)
-
-	if img, ov, err := s.getOverrideImage(ctx, device.ID, data.OverrideForeground, minPriority); err != nil {
-		slog.Error("Failed to get foreground override image", "device", device.ID, "error", err)
-	} else if ov != nil && len(img) > 0 {
-		return s.handleOverrideImage(ctx, device, user, img, ov, false)
-	}
 
 	if img, ov, err := s.getOverrideImage(ctx, device.ID, data.OverridePinned, minPriority); err != nil {
 		slog.Error("Failed to get pinned override image", "device", device.ID, "error", err)

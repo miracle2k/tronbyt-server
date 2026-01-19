@@ -86,7 +86,7 @@ func (s *Server) deleteOverride(ctx context.Context, ov *data.DeviceOverride) {
 func (s *Server) cleanupExpiredOverrides(ctx context.Context, deviceID string) {
 	now := time.Now()
 	expired, err := gorm.G[data.DeviceOverride](s.DB).
-		Where("device_id = ? AND ((ends_at IS NOT NULL AND ends_at <= ?) OR (remaining_shows IS NOT NULL AND remaining_shows <= 0))", deviceID, now).
+		Where("device_id = ? AND (ends_at IS NOT NULL AND ends_at <= ?)", deviceID, now).
 		Find(ctx)
 	if err != nil {
 		slog.Warn("Failed to query expired overrides", "device_id", deviceID, "error", err)
@@ -103,7 +103,6 @@ func (s *Server) findActiveOverride(ctx context.Context, deviceID string, kind d
 		Where("device_id = ? AND kind = ?", deviceID, kind).
 		Where("(starts_at IS NULL OR starts_at <= ?)", now).
 		Where("(ends_at IS NULL OR ends_at > ?)", now).
-		Where("(remaining_shows IS NULL OR remaining_shows > 0)").
 		Order("priority DESC, (last_served_at IS NULL) DESC, last_served_at ASC, created_at ASC")
 
 	if minPriority > 0 {
@@ -125,30 +124,10 @@ func (s *Server) markOverrideServed(ctx context.Context, ov *data.DeviceOverride
 		return false, nil
 	}
 	now := time.Now()
-	deleteAfter := false
 
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
 		current, err := gorm.G[data.DeviceOverride](tx, clause.Locking{Strength: "UPDATE"}).Where("id = ?", ov.ID).First(ctx)
 		if err != nil {
-			return err
-		}
-
-		if current.RemainingShows != nil {
-			remaining := *current.RemainingShows
-			if remaining <= 1 {
-				if _, err := gorm.G[data.DeviceOverride](tx).Where("id = ?", current.ID).Delete(ctx); err != nil {
-					return err
-				}
-				deleteAfter = true
-				return nil
-			}
-
-			newVal := remaining - 1
-			updates := data.DeviceOverride{
-				RemainingShows: &newVal,
-				LastServedAt:   &now,
-			}
-			_, err := gorm.G[data.DeviceOverride](tx).Where("id = ?", current.ID).Select("remaining_shows", "last_served_at").Updates(ctx, updates)
 			return err
 		}
 
@@ -165,8 +144,7 @@ func (s *Server) markOverrideServed(ctx context.Context, ov *data.DeviceOverride
 		}
 		return false, err
 	}
-
-	return deleteAfter, nil
+	return false, nil
 }
 
 func (s *Server) getOverrideImage(ctx context.Context, deviceID string, kind data.OverrideKind, minPriority int) ([]byte, *data.DeviceOverride, error) {

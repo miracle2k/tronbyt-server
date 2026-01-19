@@ -80,7 +80,6 @@ type OverrideCreateRequest struct {
 	Priority       *int   `json:"priority"`
 	DurationSec    *int   `json:"durationSec"`
 	DisplayTimeSec *int   `json:"displayTimeSec"`
-	Shows          *int   `json:"shows"`
 	Image          string `json:"image"`
 }
 
@@ -90,7 +89,6 @@ type OverridePayload struct {
 	Priority       int               `json:"priority"`
 	StartsAt       *string           `json:"startsAt,omitempty"`
 	EndsAt         *string           `json:"endsAt,omitempty"`
-	RemainingShows *int              `json:"remainingShows,omitempty"`
 	DisplayTimeSec *int              `json:"displayTimeSec,omitempty"`
 	LastServedAt   *string           `json:"lastServedAt,omitempty"`
 	CreatedAt      string            `json:"createdAt"`
@@ -369,8 +367,6 @@ func (s *Server) handleGetInstallation(w http.ResponseWriter, r *http.Request) {
 
 func parseOverrideKind(raw string) (data.OverrideKind, bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case string(data.OverrideForeground):
-		return data.OverrideForeground, true
 	case string(data.OverridePinned):
 		return data.OverridePinned, true
 	case string(data.OverrideInterstitial):
@@ -407,7 +403,6 @@ func (s *Server) toOverridePayload(ov *data.DeviceOverride) OverridePayload {
 		Priority:       ov.Priority,
 		StartsAt:       startsAt,
 		EndsAt:         endsAt,
-		RemainingShows: ov.RemainingShows,
 		DisplayTimeSec: ov.DisplayTimeSec,
 		LastServedAt:   lastServedAt,
 		CreatedAt:      createdAt,
@@ -424,7 +419,6 @@ func (s *Server) handleListOverrides(w http.ResponseWriter, r *http.Request) {
 		Where("device_id = ?", device.ID).
 		Where("(starts_at IS NULL OR starts_at <= ?)", now).
 		Where("(ends_at IS NULL OR ends_at > ?)", now).
-		Where("(remaining_shows IS NULL OR remaining_shows > 0)").
 		Order("priority DESC, created_at DESC").
 		Find(r.Context())
 	if err != nil {
@@ -496,20 +490,6 @@ func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var remainingShows *int
-	if kind == data.OverrideForeground {
-		shows := req.Shows
-		if shows == nil {
-			defaultShows := 1
-			shows = &defaultShows
-		}
-		if *shows <= 0 {
-			http.Error(w, "Shows must be > 0", http.StatusBadRequest)
-			return
-		}
-		remainingShows = shows
-	}
-
 	overrideID, err := generateSecureToken(12)
 	if err != nil {
 		http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
@@ -531,7 +511,6 @@ func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
 		Priority:       priority,
 		StartsAt:       startsAt,
 		EndsAt:         endsAt,
-		RemainingShows: remainingShows,
 		DisplayTimeSec: req.DisplayTimeSec,
 		ImageKey:       overrideID,
 	}

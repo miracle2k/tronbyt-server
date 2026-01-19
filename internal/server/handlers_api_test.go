@@ -714,53 +714,6 @@ func TestHandleRebootDeviceAPI(t *testing.T) {
 	}
 }
 
-func TestHandleCreateOverride_DefaultForegroundShows(t *testing.T) {
-	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
-
-	img := base64.StdEncoding.EncodeToString([]byte("test-image"))
-	payload := map[string]any{
-		"kind":           "foreground",
-		"image":          img,
-		"displayTimeSec": 3,
-	}
-	body, _ := json.Marshal(payload)
-
-	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/overrides", apiKey, body)
-	rr := httptest.NewRecorder()
-	s.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("handler returned wrong status code: got %v want %v: %s",
-			rr.Code, http.StatusOK, rr.Body.String())
-	}
-
-	var resp struct {
-		Overrides []OverridePayload `json:"overrides"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if len(resp.Overrides) != 1 {
-		t.Fatalf("expected 1 override, got %d", len(resp.Overrides))
-	}
-	ov := resp.Overrides[0]
-	if ov.RemainingShows == nil || *ov.RemainingShows != 1 {
-		t.Fatalf("expected remainingShows=1, got %v", ov.RemainingShows)
-	}
-	if ov.DisplayTimeSec == nil || *ov.DisplayTimeSec != 3 {
-		t.Fatalf("expected displayTimeSec=3, got %v", ov.DisplayTimeSec)
-	}
-
-	path, err := s.overrideImagePath("testdevice", ov.ID)
-	if err != nil {
-		t.Fatalf("failed to resolve override image path: %v", err)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected override image to exist: %v", err)
-	}
-}
-
 func TestHandleCreateOverride_Invalid(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "device_api_key"
@@ -780,6 +733,10 @@ func TestHandleCreateOverride_Invalid(t *testing.T) {
 		{
 			name: "invalid kind",
 			body: map[string]any{"kind": "nope", "image": base64.StdEncoding.EncodeToString([]byte("img"))},
+		},
+		{
+			name: "foreground removed",
+			body: map[string]any{"kind": "foreground", "image": base64.StdEncoding.EncodeToString([]byte("img"))},
 		},
 	}
 
@@ -842,12 +799,10 @@ func TestHandleListOverrides_FiltersExpired(t *testing.T) {
 	now := time.Now()
 	past := now.Add(-1 * time.Minute)
 	future := now.Add(1 * time.Minute)
-	zero := 0
 
 	overrides := []data.DeviceOverride{
 		{ID: "active-1", DeviceID: "testdevice", Kind: data.OverridePinned, EndsAt: &future},
 		{ID: "expired-1", DeviceID: "testdevice", Kind: data.OverridePinned, EndsAt: &past},
-		{ID: "expired-2", DeviceID: "testdevice", Kind: data.OverrideForeground, RemainingShows: &zero},
 	}
 	for i := range overrides {
 		if err := gorm.G[data.DeviceOverride](s.DB).Create(context.Background(), &overrides[i]); err != nil {

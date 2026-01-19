@@ -550,7 +550,6 @@ type App struct {
 type OverrideKind string
 
 const (
-	OverrideForeground   OverrideKind = "foreground"
 	OverridePinned       OverrideKind = "pinned"
 	OverrideInterstitial OverrideKind = "interstitial"
 )
@@ -562,7 +561,6 @@ type DeviceOverride struct {
 	Priority       int          `json:"priority"`
 	StartsAt       *time.Time   `json:"starts_at"`
 	EndsAt         *time.Time   `json:"ends_at"`
-	RemainingShows *int         `json:"remaining_shows"`
 	DisplayTimeSec *int         `json:"display_time_sec"`
 	ImageKey       string       `json:"image_key"`
 	LastServedAt   *time.Time   `json:"last_served_at"`
