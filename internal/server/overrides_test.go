@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"tronbyt-server/internal/data"
 
@@ -335,5 +336,225 @@ func TestOverrideDisplayTime_DefaultsToDeviceInterval(t *testing.T) {
 	}
 	if dwell := device.GetEffectiveDwellTime(app); dwell != 17 {
 		t.Fatalf("expected dwell=17, got %d", dwell)
+	}
+}
+
+func TestGetOverrideImage_ForegroundQueueOrder(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "foreground-queue-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	device := data.Device{ID: "foreground-queue-device", Username: user.Username}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	now := time.Now()
+	start := now.Add(-2 * time.Minute)
+	shows := 1
+
+	ov1 := data.DeviceOverride{
+		ID:             "fg-1",
+		DeviceID:       device.ID,
+		Kind:           data.OverrideForeground,
+		Priority:       0,
+		StartsAt:       &start,
+		RemainingShows: &shows,
+		ImageKey:       "fg-1",
+		CreatedAt:      now.Add(-2 * time.Minute),
+	}
+	ov2 := data.DeviceOverride{
+		ID:             "fg-2",
+		DeviceID:       device.ID,
+		Kind:           data.OverrideForeground,
+		Priority:       0,
+		StartsAt:       &start,
+		RemainingShows: &shows,
+		ImageKey:       "fg-2",
+		CreatedAt:      now.Add(-1 * time.Minute),
+	}
+
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov1); err != nil {
+		t.Fatalf("failed to create override 1: %v", err)
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov2); err != nil {
+		t.Fatalf("failed to create override 2: %v", err)
+	}
+
+	if err := s.saveOverrideImage(device.ID, ov1.ImageKey, []byte("img-1")); err != nil {
+		t.Fatalf("failed to save override image 1: %v", err)
+	}
+	if err := s.saveOverrideImage(device.ID, ov2.ImageKey, []byte("img-2")); err != nil {
+		t.Fatalf("failed to save override image 2: %v", err)
+	}
+
+	img, _, err := s.getOverrideImage(ctx, device.ID, data.OverrideForeground, 0)
+	if err != nil {
+		t.Fatalf("getOverrideImage failed: %v", err)
+	}
+	if string(img) != "img-1" {
+		t.Fatalf("expected first override image, got %q", img)
+	}
+
+	img, _, err = s.getOverrideImage(ctx, device.ID, data.OverrideForeground, 0)
+	if err != nil {
+		t.Fatalf("getOverrideImage failed (second): %v", err)
+	}
+	if string(img) != "img-2" {
+		t.Fatalf("expected second override image, got %q", img)
+	}
+
+	if _, err := gorm.G[data.DeviceOverride](s.DB).Where("device_id = ?", device.ID).First(ctx); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected all foreground overrides to be consumed, got err=%v", err)
+	}
+}
+
+func TestGetOverrideImage_PinnedRoundRobin(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "pinned-roundrobin-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	device := data.Device{ID: "pinned-roundrobin-device", Username: user.Username}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	now := time.Now()
+	start := now.Add(-2 * time.Minute)
+
+	ov1 := data.DeviceOverride{
+		ID:        "pin-1",
+		DeviceID:  device.ID,
+		Kind:      data.OverridePinned,
+		Priority:  0,
+		StartsAt:  &start,
+		ImageKey:  "pin-1",
+		CreatedAt: now.Add(-2 * time.Minute),
+	}
+	ov2 := data.DeviceOverride{
+		ID:        "pin-2",
+		DeviceID:  device.ID,
+		Kind:      data.OverridePinned,
+		Priority:  0,
+		StartsAt:  &start,
+		ImageKey:  "pin-2",
+		CreatedAt: now.Add(-1 * time.Minute),
+	}
+
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov1); err != nil {
+		t.Fatalf("failed to create override 1: %v", err)
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov2); err != nil {
+		t.Fatalf("failed to create override 2: %v", err)
+	}
+
+	if err := s.saveOverrideImage(device.ID, ov1.ImageKey, []byte("pin-1")); err != nil {
+		t.Fatalf("failed to save override image 1: %v", err)
+	}
+	if err := s.saveOverrideImage(device.ID, ov2.ImageKey, []byte("pin-2")); err != nil {
+		t.Fatalf("failed to save override image 2: %v", err)
+	}
+
+	img, _, err := s.getOverrideImage(ctx, device.ID, data.OverridePinned, 0)
+	if err != nil {
+		t.Fatalf("getOverrideImage failed: %v", err)
+	}
+	if string(img) != "pin-1" {
+		t.Fatalf("expected first pinned override, got %q", img)
+	}
+
+	img, _, err = s.getOverrideImage(ctx, device.ID, data.OverridePinned, 0)
+	if err != nil {
+		t.Fatalf("getOverrideImage failed (second): %v", err)
+	}
+	if string(img) != "pin-2" {
+		t.Fatalf("expected second pinned override, got %q", img)
+	}
+
+	img, _, err = s.getOverrideImage(ctx, device.ID, data.OverridePinned, 0)
+	if err != nil {
+		t.Fatalf("getOverrideImage failed (third): %v", err)
+	}
+	if string(img) != "pin-1" {
+		t.Fatalf("expected round-robin to return first pinned override, got %q", img)
+	}
+}
+
+func TestPeekOverride_InterstitialRoundRobin(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "interstitial-roundrobin-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	device := data.Device{ID: "interstitial-roundrobin-device", Username: user.Username}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	now := time.Now()
+	start := now.Add(-2 * time.Minute)
+
+	ov1 := data.DeviceOverride{
+		ID:        "int-1",
+		DeviceID:  device.ID,
+		Kind:      data.OverrideInterstitial,
+		Priority:  0,
+		StartsAt:  &start,
+		ImageKey:  "int-1",
+		CreatedAt: now.Add(-2 * time.Minute),
+	}
+	ov2 := data.DeviceOverride{
+		ID:        "int-2",
+		DeviceID:  device.ID,
+		Kind:      data.OverrideInterstitial,
+		Priority:  0,
+		StartsAt:  &start,
+		ImageKey:  "int-2",
+		CreatedAt: now.Add(-1 * time.Minute),
+	}
+
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov1); err != nil {
+		t.Fatalf("failed to create override 1: %v", err)
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov2); err != nil {
+		t.Fatalf("failed to create override 2: %v", err)
+	}
+
+	selected, err := s.peekOverride(ctx, device.ID, data.OverrideInterstitial, 0)
+	if err != nil {
+		t.Fatalf("peekOverride failed: %v", err)
+	}
+	if selected == nil || selected.ID != ov1.ID {
+		t.Fatalf("expected first interstitial override, got %v", selected)
+	}
+	if _, err := s.markOverrideServed(ctx, selected); err != nil {
+		t.Fatalf("markOverrideServed failed: %v", err)
+	}
+
+	selected, err = s.peekOverride(ctx, device.ID, data.OverrideInterstitial, 0)
+	if err != nil {
+		t.Fatalf("peekOverride failed (second): %v", err)
+	}
+	if selected == nil || selected.ID != ov2.ID {
+		t.Fatalf("expected second interstitial override, got %v", selected)
+	}
+	if _, err := s.markOverrideServed(ctx, selected); err != nil {
+		t.Fatalf("markOverrideServed failed (second): %v", err)
+	}
+
+	selected, err = s.peekOverride(ctx, device.ID, data.OverrideInterstitial, 0)
+	if err != nil {
+		t.Fatalf("peekOverride failed (third): %v", err)
+	}
+	if selected == nil || selected.ID != ov1.ID {
+		t.Fatalf("expected round-robin to return first interstitial override, got %v", selected)
 	}
 }

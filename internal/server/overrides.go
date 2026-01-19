@@ -104,7 +104,7 @@ func (s *Server) findActiveOverride(ctx context.Context, deviceID string, kind d
 		Where("(starts_at IS NULL OR starts_at <= ?)", now).
 		Where("(ends_at IS NULL OR ends_at > ?)", now).
 		Where("(remaining_shows IS NULL OR remaining_shows > 0)").
-		Order("priority DESC, created_at DESC")
+		Order("priority DESC, (last_served_at IS NULL) DESC, last_served_at ASC, created_at ASC")
 
 	if minPriority > 0 {
 		q = q.Where("priority >= ?", minPriority)
