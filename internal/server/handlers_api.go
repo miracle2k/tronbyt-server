@@ -101,6 +101,10 @@ type NotificationCreateRequest struct {
 	Priority           *int   `json:"priority"`
 	PinForSec          *int   `json:"pinForSec"`
 	InterstitialForSec *int   `json:"interstitialForSec"`
+	Title              string `json:"title"`
+	Subtitle           string `json:"subtitle"`
+	Subtitle2          string `json:"subtitle2"`
+	Icon               string `json:"icon"`
 	Image              string `json:"image"`
 }
 
@@ -662,22 +666,68 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if strings.TrimSpace(req.Image) == "" {
-		http.Error(w, "Missing image", http.StatusBadRequest)
+	trimTitle := strings.TrimSpace(req.Title)
+	trimSubtitle := strings.TrimSpace(req.Subtitle)
+	trimSubtitle2 := strings.TrimSpace(req.Subtitle2)
+	trimIcon := strings.TrimSpace(req.Icon)
+	trimImage := strings.TrimSpace(req.Image)
+
+	hasText := trimTitle != ""
+	hasImage := trimImage != ""
+
+	if !hasText && (trimSubtitle != "" || trimSubtitle2 != "" || trimIcon != "") {
+		http.Error(w, "Title is required for text notifications", http.StatusBadRequest)
+		return
+	}
+	if hasText && hasImage {
+		http.Error(w, "Provide either title or image, not both", http.StatusBadRequest)
+		return
+	}
+	if !hasText && !hasImage {
+		http.Error(w, "Missing image or title", http.StatusBadRequest)
 		return
 	}
 
-	imageStr := req.Image
-	if strings.HasPrefix(strings.ToLower(imageStr), "data:") {
-		if idx := strings.Index(imageStr, ","); idx >= 0 {
-			imageStr = imageStr[idx+1:]
+	decodeBase64Payload := func(raw string) ([]byte, error) {
+		imageStr := strings.TrimSpace(raw)
+		if strings.HasPrefix(strings.ToLower(imageStr), "data:") {
+			if idx := strings.Index(imageStr, ","); idx >= 0 {
+				imageStr = imageStr[idx+1:]
+			}
 		}
+		imgBytes, err := base64.StdEncoding.DecodeString(imageStr)
+		if err != nil || len(imgBytes) == 0 {
+			return nil, fmt.Errorf("invalid base64 image")
+		}
+		return imgBytes, nil
 	}
 
-	imgBytes, err := base64.StdEncoding.DecodeString(imageStr)
-	if err != nil || len(imgBytes) == 0 {
-		http.Error(w, "Invalid Base64 Image", http.StatusBadRequest)
-		return
+	var imgBytes []byte
+	if hasText {
+		iconB64 := ""
+		if trimIcon != "" {
+			iconBytes, err := decodeBase64Payload(trimIcon)
+			if err != nil {
+				http.Error(w, "Invalid Base64 Icon", http.StatusBadRequest)
+				return
+			}
+			iconB64 = base64.StdEncoding.EncodeToString(iconBytes)
+		}
+
+		rendered, err := s.renderNotificationImage(r.Context(), device, trimTitle, trimSubtitle, trimSubtitle2, iconB64)
+		if err != nil {
+			slog.Error("Failed to render notification", "error", err)
+			http.Error(w, "Failed to render notification", http.StatusInternalServerError)
+			return
+		}
+		imgBytes = rendered
+	} else {
+		var err error
+		imgBytes, err = decodeBase64Payload(trimImage)
+		if err != nil {
+			http.Error(w, "Invalid Base64 Image", http.StatusBadRequest)
+			return
+		}
 	}
 
 	priority := 0

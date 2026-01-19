@@ -1042,3 +1042,84 @@ func TestHandleCreateNotification_CreatesOverrides(t *testing.T) {
 		t.Fatalf("expected interstitial starts_at to match pinned end, delta=%s", delta)
 	}
 }
+
+func TestHandleCreateNotification_Text(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	body, _ := json.Marshal(map[string]any{
+		"pinForSec": 60,
+		"title":     "Dishwasher done",
+		"subtitle":  "Kitchen",
+		"subtitle2": "Please unload",
+	})
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Notifications []NotificationPayload `json:"notifications"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(resp.Notifications))
+	}
+
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("managed_by_notif = ?", resp.Notifications[0].ID).
+		Find(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load overrides: %v", err)
+	}
+	if len(overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(overrides))
+	}
+}
+
+func TestHandleCreateNotification_Invalid(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "missing image and title",
+			body: map[string]any{"pinForSec": 60},
+		},
+		{
+			name: "both image and title",
+			body: map[string]any{
+				"pinForSec": 60,
+				"title":     "Hi",
+				"image":     base64.StdEncoding.EncodeToString([]byte("img")),
+			},
+		},
+		{
+			name: "subtitle without title",
+			body: map[string]any{
+				"pinForSec": 60,
+				"subtitle":  "No title",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(tc.body)
+			req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+			rr := httptest.NewRecorder()
+			s.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
