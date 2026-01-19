@@ -1,0 +1,290 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"tronbyt-server/internal/data"
+
+	"gorm.io/gorm"
+)
+
+func TestGetOverrideImage_RemainingShowsAndCleanup(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "override-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	device := data.Device{ID: "override-device", Username: user.Username, Brightness: 10}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	shows := 2
+	ov := data.DeviceOverride{
+		ID:             "override-1",
+		DeviceID:       device.ID,
+		Kind:           data.OverrideForeground,
+		RemainingShows: &shows,
+		ImageKey:       "override-1",
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov); err != nil {
+		t.Fatalf("failed to create override: %v", err)
+	}
+	img := []byte("override-image")
+	if err := s.saveOverrideImage(device.ID, ov.ImageKey, img); err != nil {
+		t.Fatalf("failed to save override image: %v", err)
+	}
+
+	got, gotOv, err := s.getOverrideImage(ctx, device.ID, data.OverrideForeground, 0)
+	if err != nil {
+		t.Fatalf("getOverrideImage failed: %v", err)
+	}
+	if gotOv == nil || gotOv.ID != ov.ID {
+		t.Fatalf("expected override %s, got %v", ov.ID, gotOv)
+	}
+	if string(got) != string(img) {
+		t.Fatalf("expected override image %q, got %q", img, got)
+	}
+
+	updated, err := gorm.G[data.DeviceOverride](s.DB).Where("id = ?", ov.ID).First(ctx)
+	if err != nil {
+		t.Fatalf("failed to load override: %v", err)
+	}
+	if updated.RemainingShows == nil || *updated.RemainingShows != 1 {
+		t.Fatalf("expected remainingShows=1, got %v", updated.RemainingShows)
+	}
+
+	got, gotOv, err = s.getOverrideImage(ctx, device.ID, data.OverrideForeground, 0)
+	if err != nil {
+		t.Fatalf("getOverrideImage failed (second): %v", err)
+	}
+	if gotOv == nil || gotOv.ID != ov.ID {
+		t.Fatalf("expected override %s on second fetch, got %v", ov.ID, gotOv)
+	}
+	if string(got) != string(img) {
+		t.Fatalf("expected override image %q on second fetch, got %q", img, got)
+	}
+
+	if _, err := gorm.G[data.DeviceOverride](s.DB).Where("id = ?", ov.ID).First(ctx); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected override to be deleted, got err=%v", err)
+	}
+	path, err := s.overrideImagePath(device.ID, ov.ImageKey)
+	if err != nil {
+		t.Fatalf("failed to resolve override image path: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected override image to be deleted, got err=%v", err)
+	}
+}
+
+func TestGetOverrideImage_MissingImageDeletesOverride(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "missing-image-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	device := data.Device{ID: "missing-image-device", Username: user.Username}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	ov := data.DeviceOverride{
+		ID:       "override-missing",
+		DeviceID: device.ID,
+		Kind:     data.OverridePinned,
+		ImageKey: "override-missing",
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov); err != nil {
+		t.Fatalf("failed to create override: %v", err)
+	}
+
+	img, gotOv, err := s.getOverrideImage(ctx, device.ID, data.OverridePinned, 0)
+	if err != nil {
+		t.Fatalf("getOverrideImage failed: %v", err)
+	}
+	if img != nil || gotOv != nil {
+		t.Fatalf("expected no override image, got %v / %v", img, gotOv)
+	}
+	if _, err := gorm.G[data.DeviceOverride](s.DB).Where("id = ?", ov.ID).First(ctx); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected override to be deleted, got err=%v", err)
+	}
+}
+
+func TestGetNextAppImage_OverridePrecedence(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "precedence-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	device := data.Device{ID: "precedence-device", Username: user.Username, Brightness: 10}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	pinned := data.DeviceOverride{
+		ID:             "override-pinned",
+		DeviceID:       device.ID,
+		Kind:           data.OverridePinned,
+		DisplayTimeSec: intPtr(8),
+		ImageKey:       "override-pinned",
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &pinned); err != nil {
+		t.Fatalf("failed to create pinned override: %v", err)
+	}
+	if err := s.saveOverrideImage(device.ID, pinned.ImageKey, []byte("pinned-img")); err != nil {
+		t.Fatalf("failed to save pinned override image: %v", err)
+	}
+
+	remaining := 1
+	foreground := data.DeviceOverride{
+		ID:             "override-foreground",
+		DeviceID:       device.ID,
+		Kind:           data.OverrideForeground,
+		DisplayTimeSec: intPtr(5),
+		RemainingShows: &remaining,
+		ImageKey:       "override-foreground",
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &foreground); err != nil {
+		t.Fatalf("failed to create foreground override: %v", err)
+	}
+	if err := s.saveOverrideImage(device.ID, foreground.ImageKey, []byte("foreground-img")); err != nil {
+		t.Fatalf("failed to save foreground override image: %v", err)
+	}
+
+	img, app, err := s.GetNextAppImage(ctx, &device, &user)
+	if err != nil {
+		t.Fatalf("GetNextAppImage failed: %v", err)
+	}
+	if string(img) != "foreground-img" {
+		t.Fatalf("expected foreground override image, got %q", img)
+	}
+	if app == nil || app.DisplayTime != 5 {
+		t.Fatalf("expected displayTime=5, got %v", app)
+	}
+
+	img, app, err = s.GetNextAppImage(ctx, &device, &user)
+	if err != nil {
+		t.Fatalf("GetNextAppImage failed (second): %v", err)
+	}
+	if string(img) != "pinned-img" {
+		t.Fatalf("expected pinned override image, got %q", img)
+	}
+	if app == nil || app.DisplayTime != 8 {
+		t.Fatalf("expected displayTime=8, got %v", app)
+	}
+}
+
+func TestGetNextAppImage_NightModeMinPriority(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "night-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	device := data.Device{
+		ID:               "night-device",
+		Username:         user.Username,
+		Brightness:       10,
+		NightModeEnabled: true,
+		NightStart:       "00:00",
+		NightEnd:         "23:59",
+		NightBrightness:  10,
+		LastAppIndex:     -1,
+	}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	app := data.App{
+		DeviceID: device.ID,
+		Iname:    "app-1",
+		Name:     "App 1",
+		Enabled:  true,
+		Pushed:   true,
+		Order:    1,
+	}
+	if err := gorm.G[data.App](s.DB).Create(ctx, &app); err != nil {
+		t.Fatalf("failed to create app: %v", err)
+	}
+
+	deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+	if err != nil {
+		t.Fatalf("failed to create device webp dir: %v", err)
+	}
+	pushedDir := filepath.Join(deviceWebpDir, "pushed")
+	if err := os.MkdirAll(pushedDir, 0755); err != nil {
+		t.Fatalf("failed to create pushed dir: %v", err)
+	}
+	appImage := []byte("app-image")
+	if err := os.WriteFile(filepath.Join(pushedDir, "app-1.webp"), appImage, 0644); err != nil {
+		t.Fatalf("failed to write app image: %v", err)
+	}
+
+	d, err := gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", device.ID).First(ctx)
+	if err != nil {
+		t.Fatalf("failed to reload device: %v", err)
+	}
+
+	low := data.DeviceOverride{
+		ID:       "override-low",
+		DeviceID: device.ID,
+		Kind:     data.OverridePinned,
+		Priority: 50,
+		ImageKey: "override-low",
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &low); err != nil {
+		t.Fatalf("failed to create low override: %v", err)
+	}
+	if err := s.saveOverrideImage(device.ID, low.ImageKey, []byte("low-image")); err != nil {
+		t.Fatalf("failed to save low override image: %v", err)
+	}
+
+	img, appOut, err := s.GetNextAppImage(ctx, &d, &user)
+	if err != nil {
+		t.Fatalf("GetNextAppImage failed: %v", err)
+	}
+	if string(img) != string(appImage) {
+		t.Fatalf("expected app image when priority too low, got %q", img)
+	}
+	if appOut == nil || appOut.Iname != "app-1" {
+		t.Fatalf("expected app-1 when priority too low, got %v", appOut)
+	}
+
+	high := data.DeviceOverride{
+		ID:             "override-high",
+		DeviceID:       device.ID,
+		Kind:           data.OverridePinned,
+		Priority:       100,
+		DisplayTimeSec: intPtr(9),
+		ImageKey:       "override-high",
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &high); err != nil {
+		t.Fatalf("failed to create high override: %v", err)
+	}
+	if err := s.saveOverrideImage(device.ID, high.ImageKey, []byte("high-image")); err != nil {
+		t.Fatalf("failed to save high override image: %v", err)
+	}
+
+	img, appOut, err = s.GetNextAppImage(ctx, &d, &user)
+	if err != nil {
+		t.Fatalf("GetNextAppImage failed (high): %v", err)
+	}
+	if string(img) != "high-image" {
+		t.Fatalf("expected high-priority override image, got %q", img)
+	}
+	if appOut == nil || appOut.DisplayTime != 9 {
+		t.Fatalf("expected displayTime=9 for override, got %v", appOut)
+	}
+}

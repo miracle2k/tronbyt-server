@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -711,5 +712,224 @@ func TestHandleRebootDeviceAPI(t *testing.T) {
 
 	if rr.Body.String() != "Reboot command sent." {
 		t.Errorf("Expected body 'Reboot command sent.', got '%s'", rr.Body.String())
+	}
+}
+
+func TestHandleCreateOverride_DefaultForegroundShows(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	img := base64.StdEncoding.EncodeToString([]byte("test-image"))
+	payload := map[string]any{
+		"kind":           "foreground",
+		"image":          img,
+		"displayTimeSec": 3,
+	}
+	body, _ := json.Marshal(payload)
+
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/overrides", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handler returned wrong status code: got %v want %v: %s",
+			rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Overrides []OverridePayload `json:"overrides"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(resp.Overrides))
+	}
+	ov := resp.Overrides[0]
+	if ov.RemainingShows == nil || *ov.RemainingShows != 1 {
+		t.Fatalf("expected remainingShows=1, got %v", ov.RemainingShows)
+	}
+	if ov.DisplayTimeSec == nil || *ov.DisplayTimeSec != 3 {
+		t.Fatalf("expected displayTimeSec=3, got %v", ov.DisplayTimeSec)
+	}
+
+	path, err := s.overrideImagePath("testdevice", ov.ID)
+	if err != nil {
+		t.Fatalf("failed to resolve override image path: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected override image to exist: %v", err)
+	}
+}
+
+func TestHandleCreateOverride_Phased(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	img := base64.StdEncoding.EncodeToString([]byte("test-image"))
+	payload := map[string]any{
+		"image": img,
+		"phases": []map[string]any{
+			{"kind": "pinned", "durationSec": 5, "displayTimeSec": 2},
+			{"kind": "interstitial", "durationSec": 7},
+		},
+	}
+	body, _ := json.Marshal(payload)
+
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/overrides", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handler returned wrong status code: got %v want %v: %s",
+			rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Overrides []OverridePayload `json:"overrides"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Overrides) != 2 {
+		t.Fatalf("expected 2 overrides, got %d", len(resp.Overrides))
+	}
+	if resp.Overrides[0].GroupID == nil || resp.Overrides[1].GroupID == nil {
+		t.Fatalf("expected groupId on phased overrides")
+	}
+	if *resp.Overrides[0].GroupID != *resp.Overrides[1].GroupID {
+		t.Fatalf("expected matching groupId values, got %s and %s", *resp.Overrides[0].GroupID, *resp.Overrides[1].GroupID)
+	}
+
+	if resp.Overrides[0].EndsAt == nil || resp.Overrides[1].StartsAt == nil {
+		t.Fatalf("expected endsAt and startsAt for phased overrides")
+	}
+	endFirst, err := time.Parse(time.RFC3339, *resp.Overrides[0].EndsAt)
+	if err != nil {
+		t.Fatalf("failed to parse endsAt: %v", err)
+	}
+	startSecond, err := time.Parse(time.RFC3339, *resp.Overrides[1].StartsAt)
+	if err != nil {
+		t.Fatalf("failed to parse startsAt: %v", err)
+	}
+	if !startSecond.Equal(endFirst) {
+		t.Fatalf("expected second phase to start at %s, got %s", endFirst.Format(time.RFC3339), startSecond.Format(time.RFC3339))
+	}
+}
+
+func TestHandleCreateOverride_Invalid(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "missing image",
+			body: map[string]any{"kind": "pinned"},
+		},
+		{
+			name: "invalid base64",
+			body: map[string]any{"kind": "pinned", "image": "not-base64"},
+		},
+		{
+			name: "invalid kind",
+			body: map[string]any{"kind": "nope", "image": base64.StdEncoding.EncodeToString([]byte("img"))},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(tc.body)
+			req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/overrides", apiKey, body)
+			rr := httptest.NewRecorder()
+			s.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleDeleteOverride_RemovesFile(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	ov := data.DeviceOverride{
+		ID:       "override-delete",
+		DeviceID: "testdevice",
+		Kind:     data.OverridePinned,
+		ImageKey: "override-delete",
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(context.Background(), &ov); err != nil {
+		t.Fatalf("failed to create override: %v", err)
+	}
+	if err := s.saveOverrideImage("testdevice", ov.ImageKey, []byte("img")); err != nil {
+		t.Fatalf("failed to save override image: %v", err)
+	}
+
+	req := newAPIRequest(http.MethodDelete, "/v0/devices/testdevice/overrides/override-delete", apiKey, nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handler returned wrong status code: got %v want %v: %s",
+			rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	if _, err := gorm.G[data.DeviceOverride](s.DB).Where("id = ?", ov.ID).First(context.Background()); err == nil {
+		t.Fatalf("expected override to be deleted")
+	}
+	path, err := s.overrideImagePath("testdevice", ov.ImageKey)
+	if err != nil {
+		t.Fatalf("failed to resolve override image path: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected override image to be deleted, got err=%v", err)
+	}
+}
+
+func TestHandleListOverrides_FiltersExpired(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	now := time.Now()
+	past := now.Add(-1 * time.Minute)
+	future := now.Add(1 * time.Minute)
+	zero := 0
+
+	overrides := []data.DeviceOverride{
+		{ID: "active-1", DeviceID: "testdevice", Kind: data.OverridePinned, EndsAt: &future},
+		{ID: "expired-1", DeviceID: "testdevice", Kind: data.OverridePinned, EndsAt: &past},
+		{ID: "expired-2", DeviceID: "testdevice", Kind: data.OverrideForeground, RemainingShows: &zero},
+	}
+	for i := range overrides {
+		if err := gorm.G[data.DeviceOverride](s.DB).Create(context.Background(), &overrides[i]); err != nil {
+			t.Fatalf("failed to create override: %v", err)
+		}
+	}
+
+	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/overrides", apiKey, nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handler returned wrong status code: got %v want %v: %s",
+			rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Overrides []OverridePayload `json:"overrides"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Overrides) != 1 {
+		t.Fatalf("expected 1 active override, got %d", len(resp.Overrides))
+	}
+	if resp.Overrides[0].ID != "active-1" {
+		t.Fatalf("expected active-1, got %s", resp.Overrides[0].ID)
 	}
 }
