@@ -44,7 +44,7 @@ func newTestServerAPI(t *testing.T) *Server {
 		}
 	})
 
-	if err := db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.DeviceOverride{}, &data.WebAuthnCredential{}, &data.Setting{}); err != nil {
+	if err := db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.DeviceOverride{}, &data.DeviceNotification{}, &data.WebAuthnCredential{}, &data.Setting{}); err != nil {
 		t.Fatalf("Failed to migrate DB: %v", err)
 	}
 
@@ -853,6 +853,31 @@ func TestHandleDeleteOverride_RemovesFile(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteOverride_ManagedForbidden(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	managedID := "notif-1"
+	ov := data.DeviceOverride{
+		ID:             "override-managed",
+		DeviceID:       "testdevice",
+		Kind:           data.OverridePinned,
+		ImageKey:       "override-managed",
+		ManagedByNotif: &managedID,
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(context.Background(), &ov); err != nil {
+		t.Fatalf("failed to create override: %v", err)
+	}
+
+	req := newAPIRequest(http.MethodDelete, "/v0/devices/testdevice/overrides/override-managed", apiKey, nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestHandleListOverrides_FiltersExpired(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "device_api_key"
@@ -891,5 +916,129 @@ func TestHandleListOverrides_FiltersExpired(t *testing.T) {
 	}
 	if resp.Overrides[0].ID != "active-1" {
 		t.Fatalf("expected active-1, got %s", resp.Overrides[0].ID)
+	}
+}
+
+func TestHandleListOverrides_ExcludesManaged(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	managedID := "notif-2"
+	overrides := []data.DeviceOverride{
+		{ID: "user-1", DeviceID: "testdevice", Kind: data.OverridePinned},
+		{ID: "managed-1", DeviceID: "testdevice", Kind: data.OverridePinned, ManagedByNotif: &managedID},
+	}
+	for i := range overrides {
+		if err := gorm.G[data.DeviceOverride](s.DB).Create(context.Background(), &overrides[i]); err != nil {
+			t.Fatalf("failed to create override: %v", err)
+		}
+	}
+
+	req := newAPIRequest(http.MethodGet, "/v0/devices/testdevice/overrides", apiKey, nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handler returned wrong status code: got %v want %v: %s",
+			rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Overrides []OverridePayload `json:"overrides"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(resp.Overrides))
+	}
+	if resp.Overrides[0].ID != "user-1" {
+		t.Fatalf("expected user-1 override, got %s", resp.Overrides[0].ID)
+	}
+}
+
+func TestHandleCreateNotification_CreatesOverrides(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	body, _ := json.Marshal(map[string]any{
+		"pinForSec":          60,
+		"interstitialForSec": 120,
+		"image":              base64.StdEncoding.EncodeToString([]byte("img")),
+	})
+	start := time.Now()
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Notifications []NotificationPayload `json:"notifications"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(resp.Notifications))
+	}
+	notificationID := resp.Notifications[0].ID
+
+	notification, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("id = ?", notificationID).
+		First(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load notification: %v", err)
+	}
+	if notification.PinUntil == nil || notification.InterstitialUntil == nil {
+		t.Fatalf("expected pin and interstitial until set, got %v / %v", notification.PinUntil, notification.InterstitialUntil)
+	}
+	if notification.EndsAt == nil {
+		t.Fatalf("expected ends_at set")
+	}
+	if notification.PinUntil.Before(start) {
+		t.Fatalf("expected pin_until after request start")
+	}
+
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("managed_by_notif = ?", notificationID).
+		Find(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load overrides: %v", err)
+	}
+	if len(overrides) != 2 {
+		t.Fatalf("expected 2 overrides, got %d", len(overrides))
+	}
+
+	for i := range overrides {
+		path, err := s.overrideImagePath("testdevice", overrides[i].ImageKey)
+		if err != nil {
+			t.Fatalf("failed to resolve override image path: %v", err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected override image file, got err=%v", err)
+		}
+	}
+
+	var pinned, interstitial *data.DeviceOverride
+	for i := range overrides {
+		if overrides[i].Kind == data.OverridePinned {
+			pinned = &overrides[i]
+		}
+		if overrides[i].Kind == data.OverrideInterstitial {
+			interstitial = &overrides[i]
+		}
+	}
+	if pinned == nil || interstitial == nil {
+		t.Fatalf("expected both pinned and interstitial overrides")
+	}
+	if interstitial.StartsAt == nil || pinned.EndsAt == nil {
+		t.Fatalf("expected interstitial starts_at and pinned ends_at set")
+	}
+	delta := interstitial.StartsAt.Sub(*pinned.EndsAt)
+	if delta < -2*time.Second || delta > 2*time.Second {
+		t.Fatalf("expected interstitial starts_at to match pinned end, delta=%s", delta)
 	}
 }

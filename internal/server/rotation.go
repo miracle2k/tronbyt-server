@@ -49,6 +49,10 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 		return getDefaultImage()
 	}
 
+	// 3. Notification Sync
+	s.cleanupExpiredNotifications(ctx, device.ID)
+	s.reconcileNotifications(ctx, device)
+
 	// 3. Override Logic (Pinned)
 	s.cleanupExpiredOverrides(ctx, device.ID)
 	minPriority := minOverridePriority(device)

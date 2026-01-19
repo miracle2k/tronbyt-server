@@ -564,9 +564,20 @@ type DeviceOverride struct {
 	DisplayTimeSec *int         `json:"display_time_sec"`
 	EveryN         *int         `json:"every_n"`
 	ImageKey       string       `json:"image_key"`
+	ManagedByNotif *string      `gorm:"index" json:"-"`
 	LastServedAt   *time.Time   `json:"last_served_at"`
 	LastServedGap  *int         `json:"last_served_gap"`
 	CreatedAt      time.Time    `json:"created_at"`
+}
+
+type DeviceNotification struct {
+	ID                string     `gorm:"primaryKey" json:"id"`
+	DeviceID          string     `gorm:"index" json:"device_id"`
+	Priority          int        `json:"priority"`
+	PinUntil          *time.Time `json:"pin_until"`
+	InterstitialUntil *time.Time `json:"interstitial_until"`
+	EndsAt            *time.Time `json:"ends_at"`
+	CreatedAt         time.Time  `json:"created_at"`
 }
 
 type Device struct {
