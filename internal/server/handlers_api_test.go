@@ -761,61 +761,6 @@ func TestHandleCreateOverride_DefaultForegroundShows(t *testing.T) {
 	}
 }
 
-func TestHandleCreateOverride_Phased(t *testing.T) {
-	s := newTestServerAPI(t)
-	apiKey := "device_api_key"
-
-	img := base64.StdEncoding.EncodeToString([]byte("test-image"))
-	payload := map[string]any{
-		"image": img,
-		"phases": []map[string]any{
-			{"kind": "pinned", "durationSec": 5, "displayTimeSec": 2},
-			{"kind": "interstitial", "durationSec": 7},
-		},
-	}
-	body, _ := json.Marshal(payload)
-
-	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/overrides", apiKey, body)
-	rr := httptest.NewRecorder()
-	s.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("handler returned wrong status code: got %v want %v: %s",
-			rr.Code, http.StatusOK, rr.Body.String())
-	}
-
-	var resp struct {
-		Overrides []OverridePayload `json:"overrides"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if len(resp.Overrides) != 2 {
-		t.Fatalf("expected 2 overrides, got %d", len(resp.Overrides))
-	}
-	if resp.Overrides[0].GroupID == nil || resp.Overrides[1].GroupID == nil {
-		t.Fatalf("expected groupId on phased overrides")
-	}
-	if *resp.Overrides[0].GroupID != *resp.Overrides[1].GroupID {
-		t.Fatalf("expected matching groupId values, got %s and %s", *resp.Overrides[0].GroupID, *resp.Overrides[1].GroupID)
-	}
-
-	if resp.Overrides[0].EndsAt == nil || resp.Overrides[1].StartsAt == nil {
-		t.Fatalf("expected endsAt and startsAt for phased overrides")
-	}
-	endFirst, err := time.Parse(time.RFC3339, *resp.Overrides[0].EndsAt)
-	if err != nil {
-		t.Fatalf("failed to parse endsAt: %v", err)
-	}
-	startSecond, err := time.Parse(time.RFC3339, *resp.Overrides[1].StartsAt)
-	if err != nil {
-		t.Fatalf("failed to parse startsAt: %v", err)
-	}
-	if !startSecond.Equal(endFirst) {
-		t.Fatalf("expected second phase to start at %s, got %s", endFirst.Format(time.RFC3339), startSecond.Format(time.RFC3339))
-	}
-}
-
 func TestHandleCreateOverride_Invalid(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "device_api_key"

@@ -565,7 +565,6 @@ type DeviceOverride struct {
 	RemainingShows *int         `json:"remaining_shows"`
 	DisplayTimeSec *int         `json:"display_time_sec"`
 	ImageKey       string       `json:"image_key"`
-	GroupID        *string      `json:"group_id"`
 	LastServedAt   *time.Time   `json:"last_served_at"`
 	CreatedAt      time.Time    `json:"created_at"`
 }

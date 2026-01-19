@@ -74,23 +74,14 @@ type Interstitial struct {
 	App     *string `json:"app"`
 }
 
-// OverridePhase represents a single phase in a multi-phase override request.
-type OverridePhase struct {
-	Kind           string `json:"kind"`
-	DurationSec    int    `json:"durationSec"`
-	DisplayTimeSec *int   `json:"displayTimeSec"`
-	Shows          *int   `json:"shows"`
-}
-
 // OverrideCreateRequest represents a request to create a device override.
 type OverrideCreateRequest struct {
-	Kind           string          `json:"kind"`
-	Priority       *int            `json:"priority"`
-	DurationSec    *int            `json:"durationSec"`
-	DisplayTimeSec *int            `json:"displayTimeSec"`
-	Shows          *int            `json:"shows"`
-	Image          string          `json:"image"`
-	Phases         []OverridePhase `json:"phases"`
+	Kind           string `json:"kind"`
+	Priority       *int   `json:"priority"`
+	DurationSec    *int   `json:"durationSec"`
+	DisplayTimeSec *int   `json:"displayTimeSec"`
+	Shows          *int   `json:"shows"`
+	Image          string `json:"image"`
 }
 
 type OverridePayload struct {
@@ -101,7 +92,6 @@ type OverridePayload struct {
 	EndsAt         *string           `json:"endsAt,omitempty"`
 	RemainingShows *int              `json:"remainingShows,omitempty"`
 	DisplayTimeSec *int              `json:"displayTimeSec,omitempty"`
-	GroupID        *string           `json:"groupId,omitempty"`
 	LastServedAt   *string           `json:"lastServedAt,omitempty"`
 	CreatedAt      string            `json:"createdAt"`
 }
@@ -419,7 +409,6 @@ func (s *Server) toOverridePayload(ov *data.DeviceOverride) OverridePayload {
 		EndsAt:         endsAt,
 		RemainingShows: ov.RemainingShows,
 		DisplayTimeSec: ov.DisplayTimeSec,
-		GroupID:        ov.GroupID,
 		LastServedAt:   lastServedAt,
 		CreatedAt:      createdAt,
 	}
@@ -487,140 +476,79 @@ func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
 		priority = *req.Priority
 	}
 
-	phases := req.Phases
-	phased := len(phases) > 0
-
-	if !phased {
-		if strings.TrimSpace(req.Kind) == "" {
-			http.Error(w, "Missing override kind", http.StatusBadRequest)
-			return
-		}
-		phases = []OverridePhase{{
-			Kind:           req.Kind,
-			DurationSec:    0,
-			DisplayTimeSec: req.DisplayTimeSec,
-			Shows:          req.Shows,
-		}}
+	if strings.TrimSpace(req.Kind) == "" {
+		http.Error(w, "Missing override kind", http.StatusBadRequest)
+		return
 	}
 
-	groupID := ""
-	if len(phases) > 1 {
-		id, err := generateSecureToken(8)
-		if err != nil {
-			http.Error(w, "Failed to generate group ID", http.StatusInternalServerError)
+	kind, ok := parseOverrideKind(req.Kind)
+	if !ok {
+		http.Error(w, "Invalid override kind", http.StatusBadRequest)
+		return
+	}
+
+	durationSec := 0
+	if req.DurationSec != nil {
+		durationSec = *req.DurationSec
+	}
+	if durationSec < 0 {
+		http.Error(w, "Duration must be >= 0", http.StatusBadRequest)
+		return
+	}
+
+	var remainingShows *int
+	if kind == data.OverrideForeground {
+		shows := req.Shows
+		if shows == nil {
+			defaultShows := 1
+			shows = &defaultShows
+		}
+		if *shows <= 0 {
+			http.Error(w, "Shows must be > 0", http.StatusBadRequest)
 			return
 		}
-		groupID = id
+		remainingShows = shows
+	}
+
+	overrideID, err := generateSecureToken(12)
+	if err != nil {
+		http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
+		return
 	}
 
 	now := time.Now()
-	start := now
-	created := make([]data.DeviceOverride, 0, len(phases))
-	cleanup := func() {
-		for i := range created {
-			s.deleteOverride(r.Context(), &created[i])
-		}
+	startsAt := &now
+	var endsAt *time.Time
+	if durationSec > 0 {
+		end := now.Add(time.Duration(durationSec) * time.Second)
+		endsAt = &end
 	}
 
-	for _, phase := range phases {
-		kind, ok := parseOverrideKind(phase.Kind)
-		if !ok {
-			cleanup()
-			http.Error(w, "Invalid override kind", http.StatusBadRequest)
-			return
-		}
-
-		durationSec := phase.DurationSec
-		if durationSec == 0 && req.DurationSec != nil {
-			durationSec = *req.DurationSec
-		}
-		if phased && durationSec <= 0 {
-			cleanup()
-			http.Error(w, "Duration required for phased overrides", http.StatusBadRequest)
-			return
-		}
-		if durationSec < 0 {
-			cleanup()
-			http.Error(w, "Duration must be >= 0", http.StatusBadRequest)
-			return
-		}
-
-		displayTime := phase.DisplayTimeSec
-		if displayTime == nil {
-			displayTime = req.DisplayTimeSec
-		}
-
-		var remainingShows *int
-		if kind == data.OverrideForeground {
-			shows := phase.Shows
-			if shows == nil {
-				shows = req.Shows
-			}
-			if shows == nil {
-				defaultShows := 1
-				shows = &defaultShows
-			}
-			if *shows <= 0 {
-				cleanup()
-				http.Error(w, "Shows must be > 0", http.StatusBadRequest)
-				return
-			}
-			remainingShows = shows
-		}
-
-		overrideID, err := generateSecureToken(12)
-		if err != nil {
-			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
-			return
-		}
-
-		phaseStart := start
-		var endsAt *time.Time
-		if durationSec > 0 {
-			end := phaseStart.Add(time.Duration(durationSec) * time.Second)
-			endsAt = &end
-		}
-
-		ov := data.DeviceOverride{
-			ID:             overrideID,
-			DeviceID:       device.ID,
-			Kind:           kind,
-			Priority:       priority,
-			StartsAt:       &phaseStart,
-			EndsAt:         endsAt,
-			RemainingShows: remainingShows,
-			DisplayTimeSec: displayTime,
-			ImageKey:       overrideID,
-		}
-		if groupID != "" {
-			ov.GroupID = &groupID
-		}
-
-		if err := gorm.G[data.DeviceOverride](s.DB).Create(r.Context(), &ov); err != nil {
-			cleanup()
-			http.Error(w, "Failed to create override", http.StatusInternalServerError)
-			return
-		}
-
-		if err := s.saveOverrideImage(device.ID, overrideID, imgBytes); err != nil {
-			slog.Error("Failed to save override image", "override_id", overrideID, "error", err)
-			s.deleteOverride(r.Context(), &ov)
-			cleanup()
-			http.Error(w, "Failed to save override image", http.StatusInternalServerError)
-			return
-		}
-
-		created = append(created, ov)
-
-		if endsAt != nil {
-			start = *endsAt
-		}
+	ov := data.DeviceOverride{
+		ID:             overrideID,
+		DeviceID:       device.ID,
+		Kind:           kind,
+		Priority:       priority,
+		StartsAt:       startsAt,
+		EndsAt:         endsAt,
+		RemainingShows: remainingShows,
+		DisplayTimeSec: req.DisplayTimeSec,
+		ImageKey:       overrideID,
 	}
 
-	payloads := make([]OverridePayload, 0, len(created))
-	for i := range created {
-		payloads = append(payloads, s.toOverridePayload(&created[i]))
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(r.Context(), &ov); err != nil {
+		http.Error(w, "Failed to create override", http.StatusInternalServerError)
+		return
 	}
+
+	if err := s.saveOverrideImage(device.ID, overrideID, imgBytes); err != nil {
+		slog.Error("Failed to save override image", "override_id", overrideID, "error", err)
+		s.deleteOverride(r.Context(), &ov)
+		http.Error(w, "Failed to save override image", http.StatusInternalServerError)
+		return
+	}
+
+	payloads := []OverridePayload{s.toOverridePayload(&ov)}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{"overrides": payloads}); err != nil {
