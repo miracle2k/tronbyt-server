@@ -673,3 +673,126 @@ func TestGetNextAppImage_InterstitialOverrideIndexMapping(t *testing.T) {
 		t.Fatalf("expected app B after override, got %v", app)
 	}
 }
+
+func TestForegroundOverride_DoesNotResetRotation(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "foreground-rotation-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	device := data.Device{
+		ID:           "foreground-rotation-device",
+		Username:     user.Username,
+		Brightness:   10,
+		LastAppIndex: -1,
+	}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	appA := data.App{
+		DeviceID: device.ID,
+		Iname:    "app-a",
+		Name:     "App A",
+		Enabled:  true,
+		Pushed:   true,
+		Order:    1,
+	}
+	appB := data.App{
+		DeviceID: device.ID,
+		Iname:    "app-b",
+		Name:     "App B",
+		Enabled:  true,
+		Pushed:   true,
+		Order:    2,
+	}
+	if err := gorm.G[data.App](s.DB).Create(ctx, &appA); err != nil {
+		t.Fatalf("failed to create app A: %v", err)
+	}
+	if err := gorm.G[data.App](s.DB).Create(ctx, &appB); err != nil {
+		t.Fatalf("failed to create app B: %v", err)
+	}
+
+	deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+	if err != nil {
+		t.Fatalf("failed to create device webp dir: %v", err)
+	}
+	pushedDir := filepath.Join(deviceWebpDir, "pushed")
+	if err := os.MkdirAll(pushedDir, 0755); err != nil {
+		t.Fatalf("failed to create pushed dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pushedDir, "app-a.webp"), []byte("A"), 0644); err != nil {
+		t.Fatalf("failed to write app A image: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pushedDir, "app-b.webp"), []byte("B"), 0644); err != nil {
+		t.Fatalf("failed to write app B image: %v", err)
+	}
+
+	d, err := gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", device.ID).First(ctx)
+	if err != nil {
+		t.Fatalf("failed to reload device: %v", err)
+	}
+
+	_, app, err := s.GetNextAppImage(ctx, &d, &user)
+	if err != nil {
+		t.Fatalf("GetNextAppImage failed: %v", err)
+	}
+	if app == nil || app.Iname != "app-a" {
+		t.Fatalf("expected app A first, got %v", app)
+	}
+
+	now := time.Now()
+	shows := 3
+	ov := data.DeviceOverride{
+		ID:             "foreground-override",
+		DeviceID:       device.ID,
+		Kind:           data.OverrideForeground,
+		RemainingShows: &shows,
+		StartsAt:       &now,
+		ImageKey:       "foreground-override",
+		CreatedAt:      now,
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov); err != nil {
+		t.Fatalf("failed to create override: %v", err)
+	}
+	if err := s.saveOverrideImage(device.ID, ov.ImageKey, []byte("OVR")); err != nil {
+		t.Fatalf("failed to save override image: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		img, overrideApp, err := s.GetNextAppImage(ctx, &d, &user)
+		if err != nil {
+			t.Fatalf("GetNextAppImage failed (override %d): %v", i, err)
+		}
+		if string(img) != "OVR" {
+			t.Fatalf("expected override image, got %q", img)
+		}
+		if overrideApp == nil {
+			t.Fatalf("expected override app placeholder, got nil")
+		}
+	}
+
+	dbDevice, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).First(ctx)
+	if err != nil {
+		t.Fatalf("failed to reload device after override: %v", err)
+	}
+	if dbDevice.LastAppIndex != 0 {
+		t.Fatalf("expected LastAppIndex to remain on app A (0), got %d", dbDevice.LastAppIndex)
+	}
+
+	d, err = gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", device.ID).First(ctx)
+	if err != nil {
+		t.Fatalf("failed to reload device after override: %v", err)
+	}
+
+	_, app, err = s.GetNextAppImage(ctx, &d, &user)
+	if err != nil {
+		t.Fatalf("GetNextAppImage failed after override: %v", err)
+	}
+	if app == nil || app.Iname != "app-b" {
+		t.Fatalf("expected app B after override, got %v", app)
+	}
+}
