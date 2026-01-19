@@ -288,3 +288,52 @@ func TestGetNextAppImage_NightModeMinPriority(t *testing.T) {
 		t.Fatalf("expected displayTime=9 for override, got %v", appOut)
 	}
 }
+
+func TestOverrideDisplayTime_DefaultsToDeviceInterval(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "default-dwell-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	device := data.Device{
+		ID:              "default-dwell-device",
+		Username:        user.Username,
+		Brightness:      10,
+		DefaultInterval: 17,
+	}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	ov := data.DeviceOverride{
+		ID:       "override-default-dwell",
+		DeviceID: device.ID,
+		Kind:     data.OverridePinned,
+		ImageKey: "override-default-dwell",
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ov); err != nil {
+		t.Fatalf("failed to create override: %v", err)
+	}
+	if err := s.saveOverrideImage(device.ID, ov.ImageKey, []byte("img")); err != nil {
+		t.Fatalf("failed to save override image: %v", err)
+	}
+
+	img, app, err := s.GetNextAppImage(ctx, &device, &user)
+	if err != nil {
+		t.Fatalf("GetNextAppImage failed: %v", err)
+	}
+	if string(img) != "img" {
+		t.Fatalf("expected override image, got %q", img)
+	}
+	if app == nil {
+		t.Fatalf("expected override app, got nil")
+	}
+	if app.DisplayTime != 0 {
+		t.Fatalf("expected displayTime=0 for default dwell, got %d", app.DisplayTime)
+	}
+	if dwell := device.GetEffectiveDwellTime(app); dwell != 17 {
+		t.Fatalf("expected dwell=17, got %d", dwell)
+	}
+}

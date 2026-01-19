@@ -213,6 +213,8 @@ func (s *Server) overrideDisplayTime(ov *data.DeviceOverride) int {
 	if ov != nil && ov.DisplayTimeSec != nil && *ov.DisplayTimeSec > 0 {
 		return *ov.DisplayTimeSec
 	}
+	// Nil or non-positive display time means "use device default dwell".
+	// TODO: consider a separate default dwell for notification-style overrides.
 	return 0
 }
 
