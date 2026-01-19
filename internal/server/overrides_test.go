@@ -452,7 +452,7 @@ func TestPeekOverride_InterstitialRoundRobin(t *testing.T) {
 	if selected == nil || selected.ID != ov1.ID {
 		t.Fatalf("expected first interstitial override, got %v", selected)
 	}
-	if _, err := s.markOverrideServed(ctx, selected); err != nil {
+	if err := s.markOverrideServed(ctx, selected, nil, time.Now()); err != nil {
 		t.Fatalf("markOverrideServed failed: %v", err)
 	}
 
@@ -463,7 +463,7 @@ func TestPeekOverride_InterstitialRoundRobin(t *testing.T) {
 	if selected == nil || selected.ID != ov2.ID {
 		t.Fatalf("expected second interstitial override, got %v", selected)
 	}
-	if _, err := s.markOverrideServed(ctx, selected); err != nil {
+	if err := s.markOverrideServed(ctx, selected, nil, time.Now()); err != nil {
 		t.Fatalf("markOverrideServed failed (second): %v", err)
 	}
 

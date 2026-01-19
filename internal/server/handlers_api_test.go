@@ -738,6 +738,22 @@ func TestHandleCreateOverride_Invalid(t *testing.T) {
 			name: "foreground removed",
 			body: map[string]any{"kind": "foreground", "image": base64.StdEncoding.EncodeToString([]byte("img"))},
 		},
+		{
+			name: "everyN on pinned",
+			body: map[string]any{
+				"kind":   "pinned",
+				"image":  base64.StdEncoding.EncodeToString([]byte("img")),
+				"everyN": 2,
+			},
+		},
+		{
+			name: "everyN nonpositive",
+			body: map[string]any{
+				"kind":   "interstitial",
+				"image":  base64.StdEncoding.EncodeToString([]byte("img")),
+				"everyN": 0,
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -751,6 +767,51 @@ func TestHandleCreateOverride_Invalid(t *testing.T) {
 				t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
 			}
 		})
+	}
+}
+
+func TestHandleCreateOverride_InterstitialEveryN(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	body, _ := json.Marshal(map[string]any{
+		"kind":           "interstitial",
+		"image":          base64.StdEncoding.EncodeToString([]byte("img")),
+		"everyN":         2,
+		"displayTimeSec": 5,
+	})
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/overrides", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Overrides []OverridePayload `json:"overrides"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(resp.Overrides))
+	}
+	if resp.Overrides[0].EveryN == nil || *resp.Overrides[0].EveryN != 2 {
+		t.Fatalf("expected everyN=2, got %v", resp.Overrides[0].EveryN)
+	}
+	if resp.Overrides[0].Kind != data.OverrideInterstitial {
+		t.Fatalf("expected interstitial override, got %s", resp.Overrides[0].Kind)
+	}
+
+	ov, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("id = ?", resp.Overrides[0].ID).
+		First(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load override from DB: %v", err)
+	}
+	if ov.EveryN == nil || *ov.EveryN != 2 {
+		t.Fatalf("expected everyN=2 in DB, got %v", ov.EveryN)
 	}
 }
 

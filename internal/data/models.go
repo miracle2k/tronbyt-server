@@ -562,8 +562,10 @@ type DeviceOverride struct {
 	StartsAt       *time.Time   `json:"starts_at"`
 	EndsAt         *time.Time   `json:"ends_at"`
 	DisplayTimeSec *int         `json:"display_time_sec"`
+	EveryN         *int         `json:"every_n"`
 	ImageKey       string       `json:"image_key"`
 	LastServedAt   *time.Time   `json:"last_served_at"`
+	LastServedGap  *int         `json:"last_served_gap"`
 	CreatedAt      time.Time    `json:"created_at"`
 }
 

@@ -119,11 +119,33 @@ func (s *Server) findActiveOverride(ctx context.Context, deviceID string, kind d
 	return &ov, nil
 }
 
-func (s *Server) markOverrideServed(ctx context.Context, ov *data.DeviceOverride) (bool, error) {
-	if ov == nil {
-		return false, nil
-	}
+func (s *Server) listActiveOverrides(ctx context.Context, deviceID string, kind data.OverrideKind, minPriority int) ([]data.DeviceOverride, error) {
 	now := time.Now()
+	q := gorm.G[data.DeviceOverride](s.DB).
+		Where("device_id = ? AND kind = ?", deviceID, kind).
+		Where("(starts_at IS NULL OR starts_at <= ?)", now).
+		Where("(ends_at IS NULL OR ends_at > ?)", now).
+		Order("priority DESC, (last_served_at IS NULL) DESC, last_served_at ASC, created_at ASC")
+
+	if minPriority > 0 {
+		q = q.Where("priority >= ?", minPriority)
+	}
+
+	overrides, err := q.Find(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return overrides, nil
+}
+
+func (s *Server) markOverrideServed(ctx context.Context, ov *data.DeviceOverride, gapIndex *int, servedAt time.Time) error {
+	if ov == nil {
+		return nil
+	}
+	now := servedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
 
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
 		current, err := gorm.G[data.DeviceOverride](tx, clause.Locking{Strength: "UPDATE"}).Where("id = ?", ov.ID).First(ctx)
@@ -134,17 +156,22 @@ func (s *Server) markOverrideServed(ctx context.Context, ov *data.DeviceOverride
 		updates := data.DeviceOverride{
 			LastServedAt: &now,
 		}
+		if gapIndex != nil {
+			updates.LastServedGap = gapIndex
+			_, err = gorm.G[data.DeviceOverride](tx).Where("id = ?", current.ID).Select("last_served_at", "last_served_gap").Updates(ctx, updates)
+			return err
+		}
 		_, err = gorm.G[data.DeviceOverride](tx).Where("id = ?", current.ID).Select("last_served_at").Updates(ctx, updates)
 		return err
 	})
 
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return false, nil
+			return nil
 		}
-		return false, err
+		return err
 	}
-	return false, nil
+	return nil
 }
 
 func (s *Server) getOverrideImage(ctx context.Context, deviceID string, kind data.OverrideKind, minPriority int) ([]byte, *data.DeviceOverride, error) {
@@ -169,12 +196,8 @@ func (s *Server) getOverrideImage(ctx context.Context, deviceID string, kind dat
 			continue
 		}
 
-		deleteAfter, err := s.markOverrideServed(ctx, ov)
-		if err != nil {
+		if err := s.markOverrideServed(ctx, ov, nil, time.Now()); err != nil {
 			return nil, nil, err
-		}
-		if deleteAfter {
-			s.deleteOverrideFile(deviceID, imageKey)
 		}
 
 		return img, ov, nil

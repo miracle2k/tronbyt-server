@@ -80,6 +80,7 @@ type OverrideCreateRequest struct {
 	Priority       *int   `json:"priority"`
 	DurationSec    *int   `json:"durationSec"`
 	DisplayTimeSec *int   `json:"displayTimeSec"`
+	EveryN         *int   `json:"everyN"`
 	Image          string `json:"image"`
 }
 
@@ -90,6 +91,7 @@ type OverridePayload struct {
 	StartsAt       *string           `json:"startsAt,omitempty"`
 	EndsAt         *string           `json:"endsAt,omitempty"`
 	DisplayTimeSec *int              `json:"displayTimeSec,omitempty"`
+	EveryN         *int              `json:"everyN,omitempty"`
 	LastServedAt   *string           `json:"lastServedAt,omitempty"`
 	CreatedAt      string            `json:"createdAt"`
 }
@@ -404,6 +406,7 @@ func (s *Server) toOverridePayload(ov *data.DeviceOverride) OverridePayload {
 		StartsAt:       startsAt,
 		EndsAt:         endsAt,
 		DisplayTimeSec: ov.DisplayTimeSec,
+		EveryN:         ov.EveryN,
 		LastServedAt:   lastServedAt,
 		CreatedAt:      createdAt,
 	}
@@ -490,6 +493,17 @@ func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.EveryN != nil {
+		if *req.EveryN <= 0 {
+			http.Error(w, "everyN must be > 0", http.StatusBadRequest)
+			return
+		}
+		if kind != data.OverrideInterstitial {
+			http.Error(w, "everyN is only supported for interstitial overrides", http.StatusBadRequest)
+			return
+		}
+	}
+
 	overrideID, err := generateSecureToken(12)
 	if err != nil {
 		http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
@@ -512,6 +526,7 @@ func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
 		StartsAt:       startsAt,
 		EndsAt:         endsAt,
 		DisplayTimeSec: req.DisplayTimeSec,
+		EveryN:         req.EveryN,
 		ImageKey:       overrideID,
 	}
 
