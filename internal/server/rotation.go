@@ -106,7 +106,13 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 			if deleteAfter {
 				s.deleteOverrideFile(device.ID, imageKey)
 			}
-			return s.handleOverrideImage(ctx, device, user, img, selectedOverride, true, nextIndex)
+			overrideIndex := nextIndex
+			if !device.InterstitialEnabled {
+				// Map interstitial slot index back to app-only index when interstitials
+				// are not enabled on the device.
+				overrideIndex = nextIndex / 2
+			}
+			return s.handleOverrideImage(ctx, device, user, img, selectedOverride, true, overrideIndex)
 		}
 	}
 
