@@ -1,5 +1,49 @@
 # Tronbyt Server
 
+## Fork additions (overrides + notifications)
+
+This fork adds device overrides and notifications APIs for short-lived, API-driven messages. Notifications can render text (title/subtitle/icon) or raw WebP and support optional client dedupe keys (`source` + `key`) to update/delete without storing IDs.
+
+**Overrides API (pinned/interstitial):**
+```bash
+# Create a pinned override (show for 5 minutes, 10s display time)
+curl -X POST "$SERVER/v0/devices/$DEVICE/overrides" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"pinned","durationSec":300,"displayTimeSec":10,"priority":0,"image":"<base64-webp>"}'
+
+# Create an interstitial override (show between apps)
+curl -X POST "$SERVER/v0/devices/$DEVICE/overrides" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"interstitial","durationSec":1200,"displayTimeSec":10,"everyN":1,"priority":0,"image":"<base64-webp>"}'
+
+# List / delete overrides
+curl -H "Authorization: Bearer $API_KEY" "$SERVER/v0/devices/$DEVICE/overrides"
+curl -X DELETE -H "Authorization: Bearer $API_KEY" "$SERVER/v0/devices/$DEVICE/overrides/$OVERRIDE_ID"
+```
+
+**Notifications API (pin then interstitial, with optional dedupe key):**
+```bash
+# Create a notification from an image
+curl -X POST "$SERVER/v0/devices/$DEVICE/notifications" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"pinForSec":300,"interstitialForSec":1200,"image":"<base64-webp>","source":"homeassistant","key":"dishwasher_done"}'
+
+# Create a notification from text (renders server-side)
+curl -X POST "$SERVER/v0/devices/$DEVICE/notifications" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"pinForSec":300,"interstitialForSec":1200,"title":"Dishwasher done","subtitle":"Kitchen","subtitle2":"Please unload","source":"homeassistant","key":"dishwasher_done"}'
+
+# List / delete notifications (by ID or by key)
+curl -H "Authorization: Bearer $API_KEY" "$SERVER/v0/devices/$DEVICE/notifications"
+curl -X DELETE -H "Authorization: Bearer $API_KEY" "$SERVER/v0/devices/$DEVICE/notifications/$NOTIF_ID"
+curl -X DELETE -H "Authorization: Bearer $API_KEY" \
+  "$SERVER/v0/devices/$DEVICE/notifications/by-key?source=homeassistant&key=dishwasher_done"
+```
+
 The Tronbyt Server is a Go-based application designed to manage apps on Tronbyt devices locally, without relying on Tidbyt's backend servers. It offers a web UI for app discoverability and operates independently of cloud dependencies, ensuring continued functionality even if Tidbyt's servers are offline. The server also enables some APIs that were previously blocked by Tidbyt's servers, such as Surfline apps, and supports custom hardware.
 
 However, there are some drawbacks, including the lack of a mobile app, slightly higher latency for notifications, and limited support for some built-in apps and apps relying on Tidbyt's cloud services for secrets.
