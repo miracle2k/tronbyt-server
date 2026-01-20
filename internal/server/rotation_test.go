@@ -558,6 +558,64 @@ func TestDetermineNextApp_InterstitialOverride(t *testing.T) {
 	}
 }
 
+func TestDetermineNextApp_InterstitialOverrideFallbacksToApp(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "testuser_interstitial_fallback"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	interstitialIname := "app-int"
+	device := data.Device{
+		ID:                  "device_interstitial_fallback",
+		Username:            user.Username,
+		InterstitialEnabled: true,
+		InterstitialApp:     &interstitialIname,
+		LastAppIndex:        2,
+	}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	apps := []data.App{
+		{DeviceID: device.ID, Iname: "app-a", Name: "App A", Enabled: true, Pushed: true, Order: 1},
+		{DeviceID: device.ID, Iname: "app-b", Name: "App B", Enabled: true, Pushed: true, Order: 2},
+		{DeviceID: device.ID, Iname: "app-c", Name: "App C", Enabled: true, Pushed: true, Order: 3},
+		{DeviceID: device.ID, Iname: interstitialIname, Name: "Interstitial", Enabled: true, Pushed: true, Order: 4},
+	}
+	for i := range apps {
+		if err := gorm.G[data.App](s.DB).Create(ctx, &apps[i]); err != nil {
+			t.Fatalf("failed to create app: %v", err)
+		}
+	}
+
+	d, err := gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", device.ID).First(ctx)
+	if err != nil {
+		t.Fatalf("failed to reload device with apps: %v", err)
+	}
+
+	overrides := []data.DeviceOverride{
+		{
+			Kind:          data.OverrideInterstitial,
+			EveryN:        intPtr(2),
+			LastServedGap: intPtr(0),
+		},
+	}
+
+	app, ov, _, _, err := s.determineNextApp(ctx, &d, &user, overrides)
+	if err != nil {
+		t.Fatalf("determineNextApp failed: %v", err)
+	}
+	if ov != nil {
+		t.Fatalf("expected interstitial app fallback, got override")
+	}
+	if app == nil || app.Iname != interstitialIname {
+		t.Fatalf("expected interstitial app, got %v", app)
+	}
+}
+
 func TestShouldServeInterstitialOverride_EveryN(t *testing.T) {
 	every2 := 2
 	ov := data.DeviceOverride{EveryN: &every2}

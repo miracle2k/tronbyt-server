@@ -365,6 +365,7 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 	interstitialEnabled := device.InterstitialEnabled
 	interstitialApp := resolveInterstitialApp(device, apps)
 	useOverrideInterstitial := len(interstitialOverrides) > 0
+	interstitialFallbackAllowed := interstitialEnabled && interstitialApp != nil
 	// Pragmatic guard: we don't have a dedicated "last override served" field,
 	// so we treat LastServedAt == device.LastSeen as "an override was just served"
 	// to avoid back-to-back interstitial overrides without an app in between.
@@ -374,11 +375,13 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 	}
 	if useOverrideInterstitial {
 		interstitialEnabled = true
-		placeholder := data.App{
-			Name:   "override",
-			Pushed: true,
+		if interstitialApp == nil {
+			placeholder := data.App{
+				Name:   "override",
+				Pushed: true,
+			}
+			interstitialApp = &placeholder
 		}
-		interstitialApp = &placeholder
 	}
 
 	expanded := createExpandedAppsList(device, apps, interstitialEnabled, interstitialApp)
@@ -430,7 +433,9 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 		if shouldDisplay {
 			if isInterstitialPos && useOverrideInterstitial {
 				if justServedOverride {
-					shouldDisplay = false
+					if !interstitialFallbackAllowed {
+						shouldDisplay = false
+					}
 				} else {
 					gapIndex := nextIndex / 2
 					selected := s.selectInterstitialOverride(interstitialOverrides, gapIndex, len(apps))
@@ -441,7 +446,9 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 						}
 						return nil, selected, saveIndex, &gapIndex, nil
 					}
-					shouldDisplay = false
+					if !interstitialFallbackAllowed {
+						shouldDisplay = false
+					}
 				}
 			}
 			if shouldDisplay {
