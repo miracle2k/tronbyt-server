@@ -711,7 +711,7 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 	var existingNotification *data.DeviceNotification
 	if sourcePtr != nil {
 		existing, err := gorm.G[data.DeviceNotification](s.DB).
-			Where("device_id = ? AND source = ? AND `key` = ?", device.ID, *sourcePtr, *keyPtr).
+			Where(&data.DeviceNotification{DeviceID: device.ID, Source: sourcePtr, Key: keyPtr}).
 			First(r.Context())
 		if err == nil {
 			existingNotification = &existing
@@ -940,7 +940,7 @@ func (s *Server) handleDeleteNotificationByKey(w http.ResponseWriter, r *http.Re
 	}
 
 	notification, err := gorm.G[data.DeviceNotification](s.DB).
-		Where("device_id = ? AND source = ? AND `key` = ?", device.ID, source, key).
+		Where(&data.DeviceNotification{DeviceID: device.ID, Source: &source, Key: &key}).
 		First(r.Context())
 	if err != nil {
 		http.Error(w, "Notification not found", http.StatusNotFound)
