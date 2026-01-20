@@ -48,6 +48,61 @@ func TestGetOverrideImage_MissingImageDeletesOverride(t *testing.T) {
 	}
 }
 
+func TestGetCurrentAppImage_OverrideDisplayingApp(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "preview-override-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	device := data.Device{ID: "preview-override-device", Username: user.Username, Brightness: 10}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	app := data.App{
+		DeviceID: device.ID,
+		Iname:    "app-1",
+		Name:     "App 1",
+		Enabled:  true,
+		Pushed:   true,
+		Order:    1,
+	}
+	if err := gorm.G[data.App](s.DB).Create(ctx, &app); err != nil {
+		t.Fatalf("failed to create app: %v", err)
+	}
+
+	imageKey := "override-preview"
+	if err := s.saveOverrideImage(device.ID, imageKey, []byte("OVERRIDE")); err != nil {
+		t.Fatalf("failed to save override image: %v", err)
+	}
+
+	displayName := overrideDisplayName(&data.DeviceOverride{ID: "ignore", ImageKey: imageKey})
+	if displayName == "" {
+		t.Fatalf("expected override display name to be set")
+	}
+	if _, err := gorm.G[data.Device](s.DB).Where("id = ?", device.ID).Update(ctx, "displaying_app", displayName); err != nil {
+		t.Fatalf("failed to update displaying_app: %v", err)
+	}
+
+	d, err := gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", device.ID).First(ctx)
+	if err != nil {
+		t.Fatalf("failed to reload device: %v", err)
+	}
+
+	img, appOut, err := s.GetCurrentAppImage(ctx, &d)
+	if err != nil {
+		t.Fatalf("GetCurrentAppImage failed: %v", err)
+	}
+	if string(img) != "OVERRIDE" {
+		t.Fatalf("expected override image, got %q", img)
+	}
+	if appOut == nil || appOut.Iname != displayName {
+		t.Fatalf("expected override app placeholder, got %v", appOut)
+	}
+}
+
 func TestGetNextAppImage_PinnedOverridesInterstitial(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()

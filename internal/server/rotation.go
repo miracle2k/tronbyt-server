@@ -16,6 +16,33 @@ import (
 	"gorm.io/gorm"
 )
 
+const overrideDisplayingPrefix = "__override__:"
+
+func overrideDisplayName(ov *data.DeviceOverride) string {
+	if ov == nil {
+		return ""
+	}
+	key := ov.ImageKey
+	if key == "" {
+		key = ov.ID
+	}
+	if key == "" {
+		return ""
+	}
+	return overrideDisplayingPrefix + key
+}
+
+func parseOverrideDisplayName(iname string) (string, bool) {
+	if !strings.HasPrefix(iname, overrideDisplayingPrefix) {
+		return "", false
+	}
+	key := strings.TrimPrefix(iname, overrideDisplayingPrefix)
+	if key == "" {
+		return "", false
+	}
+	return key, true
+}
+
 func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user *data.User) ([]byte, *data.App, error) {
 	// 1. Check Pushed Ephemeral Images (__*)
 	pushedDir := filepath.Join(s.DataDir, "webp", device.ID, "pushed")
@@ -190,6 +217,7 @@ func (s *Server) handleOverrideImageAt(ctx context.Context, device *data.Device,
 	overrideApp := &data.App{}
 	if ov != nil {
 		overrideApp.DisplayTime = s.overrideDisplayTime(ov)
+		overrideApp.Iname = overrideDisplayName(ov)
 	}
 
 	return img, overrideApp, nil
@@ -208,9 +236,11 @@ func (s *Server) GetCurrentAppImage(ctx context.Context, device *data.Device) ([
 	if device.DisplayingApp != nil && *device.DisplayingApp != "" {
 		targetIname := *device.DisplayingApp
 		// slog.Debug("Checking DisplayingApp", "iname", targetIname)
+		foundApp := false
 		// Find app in device.Apps
 		for i := range device.Apps {
 			if device.Apps[i].Iname == targetIname {
+				foundApp = true
 				app := &device.Apps[i]
 
 				// Generate path
@@ -229,6 +259,16 @@ func (s *Server) GetCurrentAppImage(ctx context.Context, device *data.Device) ([
 					slog.Warn("DisplayingApp file missing, falling back", "path", webpPath)
 				}
 				break // Valid app but missing file, fallthrough to legacy logic
+			}
+		}
+		if !foundApp {
+			if imageKey, ok := parseOverrideDisplayName(targetIname); ok {
+				imgData, err := s.readOverrideImage(device.ID, imageKey)
+				if err == nil {
+					overrideApp := &data.App{Iname: targetIname}
+					return imgData, overrideApp, nil
+				}
+				slog.Warn("Displaying override image missing, falling back", "device_id", device.ID, "image_key", imageKey, "error", err)
 			}
 		}
 	}
