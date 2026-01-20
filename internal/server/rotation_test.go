@@ -319,7 +319,10 @@ func TestDetermineNextApp_Pinning(t *testing.T) {
 		t.Fatalf("failed to update device: %v", err)
 	}
 
-	app, _, _, _, err := s.determineNextApp(ctx, &d, &user, nil)
+	app, selectedOverride, nextIndex, gapIndex, err := s.determineNextApp(ctx, &d, &user, nil)
+	_ = selectedOverride
+	_ = nextIndex
+	_ = gapIndex
 	if err != nil {
 		t.Fatalf("determineNextApp failed with missing pin: %v", err)
 	}
