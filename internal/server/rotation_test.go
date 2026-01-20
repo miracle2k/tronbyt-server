@@ -136,7 +136,10 @@ func TestDetermineNextApp_NightMode_NoAppSelected(t *testing.T) {
 	d.LastAppIndex = -1
 
 	// Should return the regular app
-	app, _, _, _, err := s.determineNextApp(ctx, &d, &user, nil)
+	app, selectedOverride, nextIndex, gapIndex, err := s.determineNextApp(ctx, &d, &user, nil)
+	_ = selectedOverride
+	_ = nextIndex
+	_ = gapIndex
 	if err != nil {
 		t.Fatalf("determineNextApp failed: %v", err)
 	}
@@ -208,7 +211,10 @@ func TestDetermineNextApp_NightModePrecedence(t *testing.T) {
 	}
 
 	// 1. Verify Night Mode wins when active
-	app, _, _, _, err := s.determineNextApp(ctx, &d, &user, nil)
+	app, selectedOverride, nextIndex, gapIndex, err := s.determineNextApp(ctx, &d, &user, nil)
+	_ = selectedOverride
+	_ = nextIndex
+	_ = gapIndex
 	if err != nil {
 		t.Fatalf("determineNextApp failed: %v", err)
 	}
@@ -218,7 +224,10 @@ func TestDetermineNextApp_NightModePrecedence(t *testing.T) {
 
 	// 2. Verify Pinned App wins when Night Mode is inactive
 	d.NightModeEnabled = false
-	app, _, _, _, err = s.determineNextApp(ctx, &d, &user, nil)
+	app, selectedOverride, nextIndex, gapIndex, err = s.determineNextApp(ctx, &d, &user, nil)
+	_ = selectedOverride
+	_ = nextIndex
+	_ = gapIndex
 	if err != nil {
 		t.Fatalf("determineNextApp failed (night mode disabled): %v", err)
 	}
@@ -375,7 +384,11 @@ func TestDetermineNextApp_AutoPin(t *testing.T) {
 
 	// 1. Successful Render -> Auto Pin
 	// Pushed=true bypasses rendering and success is assumed.
-	_, _, _, _, err = s.determineNextApp(ctx, &d, &user, nil)
+	nextApp, selectedOverride, nextIndex, gapIndex, err := s.determineNextApp(ctx, &d, &user, nil)
+	_ = nextApp
+	_ = selectedOverride
+	_ = nextIndex
+	_ = gapIndex
 	if err != nil {
 		t.Fatalf("determineNextApp failed: %v", err)
 	}
@@ -423,7 +436,11 @@ func TestDetermineNextApp_AutoPin(t *testing.T) {
 
 	// determineNextApp will call possiblyRender for the pinned app.
 	// We expect it to fail (EmptyLastRender=true) and then unpin.
-	_, _, _, _, err = s.determineNextApp(ctx, &d, &user, nil)
+	nextApp, selectedOverride, nextIndex, gapIndex, err = s.determineNextApp(ctx, &d, &user, nil)
+	_ = nextApp
+	_ = selectedOverride
+	_ = nextIndex
+	_ = gapIndex
 	if err != nil {
 		t.Fatalf("determineNextApp failed on unpin cycle: %v", err)
 	}

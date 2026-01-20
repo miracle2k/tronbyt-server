@@ -175,7 +175,7 @@ func (s *Server) markOverrideServed(ctx context.Context, ov *data.DeviceOverride
 }
 
 func (s *Server) getOverrideImage(ctx context.Context, deviceID string, kind data.OverrideKind, minPriority int) ([]byte, *data.DeviceOverride, error) {
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		ov, err := s.findActiveOverride(ctx, deviceID, kind, minPriority)
 		if err != nil {
 			return nil, nil, err
@@ -215,7 +215,7 @@ func (s *Server) overrideDisplayTime(ov *data.DeviceOverride) int {
 		return *ov.DisplayTimeSec
 	}
 	// Nil or non-positive display time means "use device default dwell".
-	// TODO: consider a separate default dwell for notification-style overrides.
+	// Note: a separate default dwell for notification-style overrides could be added later.
 	return 0
 }
 
