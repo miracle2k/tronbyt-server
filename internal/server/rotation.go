@@ -388,8 +388,10 @@ func (s *Server) determineNextApp(ctx context.Context, device *data.Device, user
 	useOverrideInterstitial := len(interstitialOverrides) > 0
 	interstitialFallbackAllowed := interstitialEnabled && interstitialApp != nil
 	// Pragmatic guard: we don't have a dedicated "last override served" field,
-	// so we treat LastServedAt == device.LastSeen as "an override was just served"
-	// to avoid back-to-back interstitial overrides without an app in between.
+	// so we treat LastServedAt == device.LastSeen (to the nearest second) as
+	// "an override was just served" to avoid back-to-back interstitial overrides
+	// without an app in between. We intentionally use second-level precision to
+	// tolerate DB timestamp truncation across backends.
 	justServedOverride := false
 	if useOverrideInterstitial {
 		justServedOverride = overrideServedAtLastSeen(interstitialOverrides, device.LastSeen)
@@ -509,8 +511,12 @@ func overrideServedAtLastSeen(overrides []data.DeviceOverride, lastSeen *time.Ti
 	if lastSeen == nil {
 		return false
 	}
+	lastSeenTrim := lastSeen.Truncate(time.Second)
 	for i := range overrides {
-		if overrides[i].LastServedAt != nil && overrides[i].LastServedAt.Equal(*lastSeen) {
+		if overrides[i].LastServedAt == nil {
+			continue
+		}
+		if overrides[i].LastServedAt.Truncate(time.Second).Equal(lastSeenTrim) {
 			return true
 		}
 	}
