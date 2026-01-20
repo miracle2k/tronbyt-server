@@ -828,20 +828,10 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		CreatedAt:         now,
 	}
 
-	if existingNotification != nil {
-		s.deleteNotification(r.Context(), existingNotification)
-	}
-
-	if err := gorm.G[data.DeviceNotification](s.DB).Create(r.Context(), &notification); err != nil {
-		http.Error(w, "Failed to create notification", http.StatusInternalServerError)
-		return
-	}
-
 	var overrides []data.DeviceOverride
 	if pinUntil != nil {
 		overrideID, err := generateSecureToken(12)
 		if err != nil {
-			s.deleteNotification(r.Context(), &notification)
 			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
 			return
 		}
@@ -855,17 +845,11 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 			ImageKey:       overrideID,
 			ManagedByNotif: &notificationID,
 		}
-		if err := gorm.G[data.DeviceOverride](s.DB).Create(r.Context(), &ov); err != nil {
-			s.deleteNotification(r.Context(), &notification)
-			http.Error(w, "Failed to create override", http.StatusInternalServerError)
-			return
-		}
 		overrides = append(overrides, ov)
 	}
 	if interstitialUntil != nil {
 		overrideID, err := generateSecureToken(12)
 		if err != nil {
-			s.deleteNotification(r.Context(), &notification)
 			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
 			return
 		}
@@ -881,20 +865,70 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 			ImageKey:       overrideID,
 			ManagedByNotif: &notificationID,
 		}
-		if err := gorm.G[data.DeviceOverride](s.DB).Create(r.Context(), &ov); err != nil {
-			s.deleteNotification(r.Context(), &notification)
-			http.Error(w, "Failed to create override", http.StatusInternalServerError)
-			return
-		}
 		overrides = append(overrides, ov)
+	}
+
+	var oldOverrides []data.DeviceOverride
+	if existingNotification != nil {
+		oldOverrides, _ = gorm.G[data.DeviceOverride](s.DB).
+			Where("managed_by_notif = ?", existingNotification.ID).
+			Find(r.Context())
+	}
+
+	cleanupNewImages := func() {
+		for i := range overrides {
+			imageKey := overrides[i].ImageKey
+			if imageKey == "" {
+				imageKey = overrides[i].ID
+			}
+			s.deleteOverrideFile(device.ID, imageKey)
+		}
 	}
 
 	for i := range overrides {
 		if err := s.saveOverrideImage(device.ID, overrides[i].ImageKey, imgBytes); err != nil {
-			s.deleteNotification(r.Context(), &notification)
+			cleanupNewImages()
 			http.Error(w, "Failed to save override image", http.StatusInternalServerError)
 			return
 		}
+	}
+
+	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if existingNotification != nil {
+			if _, err := gorm.G[data.DeviceOverride](tx).
+				Where("managed_by_notif = ?", existingNotification.ID).
+				Delete(r.Context()); err != nil {
+				return err
+			}
+			if _, err := gorm.G[data.DeviceNotification](tx).
+				Where("id = ?", existingNotification.ID).
+				Delete(r.Context()); err != nil {
+				return err
+			}
+		}
+
+		if err := gorm.G[data.DeviceNotification](tx).Create(r.Context(), &notification); err != nil {
+			return err
+		}
+		for i := range overrides {
+			ov := overrides[i]
+			if err := gorm.G[data.DeviceOverride](tx).Create(r.Context(), &ov); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		cleanupNewImages()
+		http.Error(w, "Failed to create notification", http.StatusInternalServerError)
+		return
+	}
+
+	for i := range oldOverrides {
+		imageKey := oldOverrides[i].ImageKey
+		if imageKey == "" {
+			imageKey = oldOverrides[i].ID
+		}
+		s.deleteOverrideFile(device.ID, imageKey)
 	}
 
 	payloads := []NotificationPayload{s.toNotificationPayload(&notification)}
