@@ -175,15 +175,12 @@ func (s *Server) markOverrideServed(ctx context.Context, ov *data.DeviceOverride
 }
 
 func (s *Server) getOverrideImage(ctx context.Context, deviceID string, kind data.OverrideKind, minPriority int) ([]byte, *data.DeviceOverride, error) {
-	for range 3 {
-		ov, err := s.findActiveOverride(ctx, deviceID, kind, minPriority)
-		if err != nil {
-			return nil, nil, err
-		}
-		if ov == nil {
-			return nil, nil, nil
-		}
-
+	overrides, err := s.listActiveOverrides(ctx, deviceID, kind, minPriority)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range overrides {
+		ov := overrides[i]
 		imageKey := ov.ImageKey
 		if imageKey == "" {
 			imageKey = ov.ID
@@ -191,16 +188,15 @@ func (s *Server) getOverrideImage(ctx context.Context, deviceID string, kind dat
 
 		img, err := s.readOverrideImage(deviceID, imageKey)
 		if err != nil {
-			slog.Warn("Override image missing, removing override", "override_id", ov.ID, "error", err)
-			s.deleteOverride(ctx, ov)
+			slog.Warn("Override image missing, skipping override", "override_id", ov.ID, "error", err)
 			continue
 		}
 
-		if err := s.markOverrideServed(ctx, ov, nil, time.Now()); err != nil {
+		if err := s.markOverrideServed(ctx, &ov, nil, time.Now()); err != nil {
 			return nil, nil, err
 		}
 
-		return img, ov, nil
+		return img, &ov, nil
 	}
 
 	return nil, nil, nil

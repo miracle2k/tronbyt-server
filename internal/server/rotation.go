@@ -102,34 +102,55 @@ func (s *Server) GetNextAppImage(ctx context.Context, device *data.Device, user 
 		slog.Error("Failed to get interstitial overrides", "device", device.ID, "error", err)
 	}
 
-	app, selectedOverride, nextIndex, gapIndex, err := s.determineNextApp(ctx, device, user, interstitialOverrides)
-	if err != nil || (app == nil && selectedOverride == nil) {
-		slog.Debug("No valid app found (e.g. all disabled or scheduled out), returning default image", "device", device.ID, "error", err)
-		return getDefaultImage()
+	filterOverrides := func(overrides []data.DeviceOverride, skipID string) []data.DeviceOverride {
+		if skipID == "" {
+			return overrides
+		}
+		filtered := make([]data.DeviceOverride, 0, len(overrides))
+		for i := range overrides {
+			if overrides[i].ID == skipID {
+				continue
+			}
+			filtered = append(filtered, overrides[i])
+		}
+		return filtered
 	}
 
-	if selectedOverride != nil {
+	var app *data.App
+	var nextIndex int
+	for {
+		selectedOverride := (*data.DeviceOverride)(nil)
+		var gapIndex *int
+
+		app, selectedOverride, nextIndex, gapIndex, err = s.determineNextApp(ctx, device, user, interstitialOverrides)
+		if err != nil || (app == nil && selectedOverride == nil) {
+			slog.Debug("No valid app found (e.g. all disabled or scheduled out), returning default image", "device", device.ID, "error", err)
+			return getDefaultImage()
+		}
+
+		if selectedOverride == nil {
+			break
+		}
+
 		imageKey := selectedOverride.ImageKey
 		if imageKey == "" {
 			imageKey = selectedOverride.ID
 		}
-		img, err := s.readOverrideImage(device.ID, imageKey)
-		if err != nil {
-			slog.Warn("Failed to read interstitial override image, removing override", "override_id", selectedOverride.ID, "error", err)
-			s.deleteOverride(ctx, selectedOverride)
-			// Retry without interstitial override
-			app, _, nextIndex, _, err = s.determineNextApp(ctx, device, user, nil)
-			if err != nil || app == nil {
-				slog.Debug("No valid app found after removing override, returning default image", "device", device.ID, "error", err)
-				return getDefaultImage()
+		img, readErr := s.readOverrideImage(device.ID, imageKey)
+		if readErr != nil {
+			slog.Warn("Failed to read interstitial override image, skipping override", "override_id", selectedOverride.ID, "error", readErr)
+			interstitialOverrides = filterOverrides(interstitialOverrides, selectedOverride.ID)
+			if len(interstitialOverrides) == 0 {
+				interstitialOverrides = nil
 			}
-		} else {
-			servedAt := time.Now()
-			if err := s.markOverrideServed(ctx, selectedOverride, gapIndex, servedAt); err != nil {
-				slog.Error("Failed to update interstitial override state", "override_id", selectedOverride.ID, "error", err)
-			}
-			return s.handleOverrideImageAt(ctx, device, user, img, selectedOverride, true, servedAt, nextIndex)
+			continue
 		}
+
+		servedAt := time.Now()
+		if err := s.markOverrideServed(ctx, selectedOverride, gapIndex, servedAt); err != nil {
+			slog.Error("Failed to update interstitial override state", "override_id", selectedOverride.ID, "error", err)
+		}
+		return s.handleOverrideImageAt(ctx, device, user, img, selectedOverride, true, servedAt, nextIndex)
 	}
 
 	// 5. Save State

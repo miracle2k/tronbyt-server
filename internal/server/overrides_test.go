@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,7 +12,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestGetOverrideImage_MissingImageDeletesOverride(t *testing.T) {
+func TestGetOverrideImage_MissingImageSkipsOverride(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
 
@@ -43,8 +42,8 @@ func TestGetOverrideImage_MissingImageDeletesOverride(t *testing.T) {
 	if img != nil || gotOv != nil {
 		t.Fatalf("expected no override image, got %v / %v", img, gotOv)
 	}
-	if _, err := gorm.G[data.DeviceOverride](s.DB).Where("id = ?", ov.ID).First(ctx); !errors.Is(err, gorm.ErrRecordNotFound) {
-		t.Fatalf("expected override to be deleted, got err=%v", err)
+	if _, err := gorm.G[data.DeviceOverride](s.DB).Where("id = ?", ov.ID).First(ctx); err != nil {
+		t.Fatalf("expected override to remain, got err=%v", err)
 	}
 }
 
@@ -227,6 +226,105 @@ func TestGetNextAppImage_PinnedOverridesInterstitial(t *testing.T) {
 	}
 	if app == nil {
 		t.Fatalf("expected override app placeholder, got nil")
+	}
+}
+
+func TestGetNextAppImage_InterstitialOverrideSkipsMissingImage(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	user := data.User{Username: "interstitial-skip-user"}
+	if err := gorm.G[data.User](s.DB).Create(ctx, &user); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	device := data.Device{
+		ID:           "interstitial-skip-device",
+		Username:     user.Username,
+		Brightness:   10,
+		LastAppIndex: -1,
+	}
+	if err := gorm.G[data.Device](s.DB).Create(ctx, &device); err != nil {
+		t.Fatalf("failed to create device: %v", err)
+	}
+
+	appA := data.App{DeviceID: device.ID, Iname: "app-a", Name: "App A", Enabled: true, Pushed: true, Order: 1}
+	appB := data.App{DeviceID: device.ID, Iname: "app-b", Name: "App B", Enabled: true, Pushed: true, Order: 2}
+	if err := gorm.G[data.App](s.DB).Create(ctx, &appA); err != nil {
+		t.Fatalf("failed to create app A: %v", err)
+	}
+	if err := gorm.G[data.App](s.DB).Create(ctx, &appB); err != nil {
+		t.Fatalf("failed to create app B: %v", err)
+	}
+
+	deviceWebpDir, err := s.ensureDeviceImageDir(device.ID)
+	if err != nil {
+		t.Fatalf("failed to create device webp dir: %v", err)
+	}
+	pushedDir := filepath.Join(deviceWebpDir, "pushed")
+	if err := os.MkdirAll(pushedDir, 0755); err != nil {
+		t.Fatalf("failed to create pushed dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pushedDir, "app-a.webp"), []byte("A"), 0644); err != nil {
+		t.Fatalf("failed to write app A image: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pushedDir, "app-b.webp"), []byte("B"), 0644); err != nil {
+		t.Fatalf("failed to write app B image: %v", err)
+	}
+
+	start := time.Now().Add(-1 * time.Minute)
+	ovMissing := data.DeviceOverride{
+		ID:        "override-missing",
+		DeviceID:  device.ID,
+		Kind:      data.OverrideInterstitial,
+		StartsAt:  &start,
+		ImageKey:  "override-missing",
+		CreatedAt: time.Now().Add(-2 * time.Second),
+	}
+	ovOk := data.DeviceOverride{
+		ID:        "override-ok",
+		DeviceID:  device.ID,
+		Kind:      data.OverrideInterstitial,
+		StartsAt:  &start,
+		ImageKey:  "override-ok",
+		CreatedAt: time.Now(),
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ovMissing); err != nil {
+		t.Fatalf("failed to create missing override: %v", err)
+	}
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(ctx, &ovOk); err != nil {
+		t.Fatalf("failed to create ok override: %v", err)
+	}
+	if err := s.saveOverrideImage(device.ID, ovOk.ImageKey, []byte("OV2")); err != nil {
+		t.Fatalf("failed to save ok override image: %v", err)
+	}
+
+	d, err := gorm.G[data.Device](s.DB).Preload("Apps", nil).Where("id = ?", device.ID).First(ctx)
+	if err != nil {
+		t.Fatalf("failed to reload device: %v", err)
+	}
+
+	_, app, err := s.GetNextAppImage(ctx, &d, &user)
+	if err != nil {
+		t.Fatalf("GetNextAppImage failed: %v", err)
+	}
+	if app == nil || app.Iname != "app-a" {
+		t.Fatalf("expected app A first, got %v", app)
+	}
+
+	img, app, err := s.GetNextAppImage(ctx, &d, &user)
+	if err != nil {
+		t.Fatalf("GetNextAppImage failed (override): %v", err)
+	}
+	if string(img) != "OV2" {
+		t.Fatalf("expected override image OV2, got %q", img)
+	}
+	if app == nil {
+		t.Fatalf("expected override app placeholder, got nil")
+	}
+
+	if _, err := gorm.G[data.DeviceOverride](s.DB).Where("id = ?", ovMissing.ID).First(ctx); err != nil {
+		t.Fatalf("expected missing override to remain, got err=%v", err)
 	}
 }
 
