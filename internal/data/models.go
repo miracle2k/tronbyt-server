@@ -571,15 +571,18 @@ type DeviceOverride struct {
 }
 
 type DeviceNotification struct {
-	ID                string     `gorm:"primaryKey"                               json:"id"`
-	DeviceID          string     `gorm:"index;index:uniq_device_notif_key,unique" json:"device_id"`
-	Source            *string    `gorm:"index:uniq_device_notif_key,unique"       json:"source"`
-	Key               *string    `gorm:"index:uniq_device_notif_key,unique"       json:"key"`
-	Priority          int        `json:"priority"`
-	PinUntil          *time.Time `json:"pin_until"`
-	InterstitialUntil *time.Time `json:"interstitial_until"`
-	EndsAt            *time.Time `json:"ends_at"`
-	CreatedAt         time.Time  `json:"created_at"`
+	ID                  string     `gorm:"primaryKey"                               json:"id"`
+	DeviceID            string     `gorm:"index;index:uniq_device_notif_key,unique" json:"device_id"`
+	Source              *string    `gorm:"index:uniq_device_notif_key,unique"       json:"source"`
+	Key                 *string    `gorm:"index:uniq_device_notif_key,unique"       json:"key"`
+	Priority            int        `json:"priority"`
+	PinUntil            *time.Time `json:"pin_until"`
+	PinForever          bool       `json:"pin_forever"`
+	InterstitialUntil   *time.Time `json:"interstitial_until"`
+	InterstitialForever bool       `json:"interstitial_forever"`
+	InterstitialEveryN  *int       `json:"interstitial_every_n"`
+	EndsAt              *time.Time `json:"ends_at"`
+	CreatedAt           time.Time  `json:"created_at"`
 }
 
 type Device struct {

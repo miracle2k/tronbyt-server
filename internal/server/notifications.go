@@ -58,7 +58,7 @@ func (s *Server) reconcileNotifications(ctx context.Context, device *data.Device
 }
 
 func (s *Server) updateNotificationInterstitial(ctx context.Context, device *data.Device, notification *data.DeviceNotification, now time.Time) {
-	if notification == nil || notification.InterstitialUntil == nil {
+	if notification == nil || notification.InterstitialUntil == nil || notification.InterstitialForever {
 		return
 	}
 	interstitialStart := notification.CreatedAt

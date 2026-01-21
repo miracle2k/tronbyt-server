@@ -99,27 +99,33 @@ type OverridePayload struct {
 
 // NotificationCreateRequest represents a request to create a device notification.
 type NotificationCreateRequest struct {
-	Priority           *int   `json:"priority"`
-	PinForSec          *int   `json:"pinForSec"`
-	InterstitialForSec *int   `json:"interstitialForSec"`
-	Source             string `json:"source"`
-	Key                string `json:"key"`
-	Title              string `json:"title"`
-	Subtitle           string `json:"subtitle"`
-	Subtitle2          string `json:"subtitle2"`
-	Icon               string `json:"icon"`
-	Image              string `json:"image"`
+	Priority            *int   `json:"priority"`
+	PinForSec           *int   `json:"pinForSec"`
+	PinForever          bool   `json:"pinForever"`
+	InterstitialForSec  *int   `json:"interstitialForSec"`
+	InterstitialForever bool   `json:"interstitialForever"`
+	InterstitialEveryN  *int   `json:"interstitialEveryN"`
+	Source              string `json:"source"`
+	Key                 string `json:"key"`
+	Title               string `json:"title"`
+	Subtitle            string `json:"subtitle"`
+	Subtitle2           string `json:"subtitle2"`
+	Icon                string `json:"icon"`
+	Image               string `json:"image"`
 }
 
 type NotificationPayload struct {
-	ID                string  `json:"id"`
-	Source            *string `json:"source,omitempty"`
-	Key               *string `json:"key,omitempty"`
-	Priority          int     `json:"priority"`
-	PinUntil          *string `json:"pinUntil,omitempty"`
-	InterstitialUntil *string `json:"interstitialUntil,omitempty"`
-	EndsAt            *string `json:"endsAt,omitempty"`
-	CreatedAt         string  `json:"createdAt"`
+	ID                  string  `json:"id"`
+	Source              *string `json:"source,omitempty"`
+	Key                 *string `json:"key,omitempty"`
+	Priority            int     `json:"priority"`
+	PinForever          bool    `json:"pinForever,omitempty"`
+	PinUntil            *string `json:"pinUntil,omitempty"`
+	InterstitialForever bool    `json:"interstitialForever,omitempty"`
+	InterstitialEveryN  *int    `json:"interstitialEveryN,omitempty"`
+	InterstitialUntil   *string `json:"interstitialUntil,omitempty"`
+	EndsAt              *string `json:"endsAt,omitempty"`
+	CreatedAt           string  `json:"createdAt"`
 }
 
 // DeviceInfo represents device firmware and protocol information in the API payload.
@@ -457,14 +463,17 @@ func (s *Server) toNotificationPayload(n *data.DeviceNotification) NotificationP
 	createdAt := n.CreatedAt.Format(time.RFC3339)
 
 	return NotificationPayload{
-		ID:                n.ID,
-		Source:            n.Source,
-		Key:               n.Key,
-		Priority:          n.Priority,
-		PinUntil:          pinUntil,
-		InterstitialUntil: interstitialUntil,
-		EndsAt:            endsAt,
-		CreatedAt:         createdAt,
+		ID:                  n.ID,
+		Source:              n.Source,
+		Key:                 n.Key,
+		Priority:            n.Priority,
+		PinForever:          n.PinForever,
+		PinUntil:            pinUntil,
+		InterstitialForever: n.InterstitialForever,
+		InterstitialEveryN:  n.InterstitialEveryN,
+		InterstitialUntil:   interstitialUntil,
+		EndsAt:              endsAt,
+		CreatedAt:           createdAt,
 	}
 }
 
@@ -772,15 +781,47 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 	if req.PinForSec != nil {
 		pinForSec = *req.PinForSec
 	}
+	pinForever := req.PinForever
 	interstitialForSec := 0
 	if req.InterstitialForSec != nil {
 		interstitialForSec = *req.InterstitialForSec
 	}
+	interstitialForever := req.InterstitialForever
 	if pinForSec < 0 || interstitialForSec < 0 {
 		http.Error(w, "Durations must be >= 0", http.StatusBadRequest)
 		return
 	}
-	if pinForSec == 0 && interstitialForSec == 0 {
+	if pinForever && interstitialForever {
+		http.Error(w, "Only one of pinForever or interstitialForever may be set", http.StatusBadRequest)
+		return
+	}
+	if pinForever && pinForSec > 0 {
+		http.Error(w, "pinForever cannot be combined with pinForSec", http.StatusBadRequest)
+		return
+	}
+	if pinForever && interstitialForSec > 0 {
+		http.Error(w, "pinForever cannot be combined with interstitialForSec", http.StatusBadRequest)
+		return
+	}
+	if interstitialForever && interstitialForSec > 0 {
+		http.Error(w, "interstitialForever cannot be combined with interstitialForSec", http.StatusBadRequest)
+		return
+	}
+	if interstitialForever && pinForSec > 0 {
+		http.Error(w, "interstitialForever cannot be combined with pinForSec", http.StatusBadRequest)
+		return
+	}
+	if req.InterstitialEveryN != nil {
+		if *req.InterstitialEveryN <= 0 {
+			http.Error(w, "interstitialEveryN must be > 0", http.StatusBadRequest)
+			return
+		}
+		if !interstitialForever {
+			http.Error(w, "interstitialEveryN is only supported with interstitialForever", http.StatusBadRequest)
+			return
+		}
+	}
+	if pinForSec == 0 && interstitialForSec == 0 && !pinForever && !interstitialForever {
 		http.Error(w, "At least one duration must be > 0", http.StatusBadRequest)
 		return
 	}
@@ -793,7 +834,7 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 
 	now := time.Now()
 	var pinUntil *time.Time
-	if pinForSec > 0 {
+	if pinForSec > 0 && !pinForever {
 		end := now.Add(time.Duration(pinForSec) * time.Second)
 		pinUntil = &end
 	}
@@ -803,7 +844,7 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		interstitialStart = *pinUntil
 	}
 	var interstitialUntil *time.Time
-	if interstitialForSec > 0 {
+	if interstitialForSec > 0 && !interstitialForever {
 		end := interstitialStart.Add(time.Duration(interstitialForSec) * time.Second)
 		interstitialUntil = &end
 	}
@@ -817,19 +858,22 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 	}
 
 	notification := data.DeviceNotification{
-		ID:                notificationID,
-		DeviceID:          device.ID,
-		Source:            sourcePtr,
-		Key:               keyPtr,
-		Priority:          priority,
-		PinUntil:          pinUntil,
-		InterstitialUntil: interstitialUntil,
-		EndsAt:            endsAt,
-		CreatedAt:         now,
+		ID:                  notificationID,
+		DeviceID:            device.ID,
+		Source:              sourcePtr,
+		Key:                 keyPtr,
+		Priority:            priority,
+		PinForever:          pinForever,
+		PinUntil:            pinUntil,
+		InterstitialForever: interstitialForever,
+		InterstitialEveryN:  req.InterstitialEveryN,
+		InterstitialUntil:   interstitialUntil,
+		EndsAt:              endsAt,
+		CreatedAt:           now,
 	}
 
 	var overrides []data.DeviceOverride
-	if pinUntil != nil {
+	if pinUntil != nil || pinForever {
 		overrideID, err := generateSecureToken(12)
 		if err != nil {
 			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
@@ -847,13 +891,16 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		}
 		overrides = append(overrides, ov)
 	}
-	if interstitialUntil != nil {
+	if interstitialUntil != nil || interstitialForever {
 		overrideID, err := generateSecureToken(12)
 		if err != nil {
 			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
 			return
 		}
 		everyN := 1
+		if interstitialForever && req.InterstitialEveryN != nil {
+			everyN = *req.InterstitialEveryN
+		}
 		ov := data.DeviceOverride{
 			ID:             overrideID,
 			DeviceID:       device.ID,

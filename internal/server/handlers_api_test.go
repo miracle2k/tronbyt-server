@@ -1082,6 +1082,125 @@ func TestHandleCreateNotification_Text(t *testing.T) {
 	}
 }
 
+func TestHandleCreateNotification_PinForever(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	body, _ := json.Marshal(map[string]any{
+		"pinForever": true,
+		"title":      "Persistent pin",
+	})
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Notifications []NotificationPayload `json:"notifications"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(resp.Notifications))
+	}
+
+	notification, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("id = ?", resp.Notifications[0].ID).
+		First(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load notification: %v", err)
+	}
+	if !notification.PinForever {
+		t.Fatalf("expected pinForever true")
+	}
+	if notification.EndsAt != nil || notification.PinUntil != nil {
+		t.Fatalf("expected pinForever notification to have no ends_at or pin_until")
+	}
+
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("managed_by_notif = ?", notification.ID).
+		Find(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load overrides: %v", err)
+	}
+	if len(overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(overrides))
+	}
+	if overrides[0].Kind != data.OverridePinned {
+		t.Fatalf("expected pinned override, got %s", overrides[0].Kind)
+	}
+	if overrides[0].EndsAt != nil {
+		t.Fatalf("expected pinned override to have no ends_at")
+	}
+}
+
+func TestHandleCreateNotification_InterstitialForever(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	body, _ := json.Marshal(map[string]any{
+		"interstitialForever": true,
+		"interstitialEveryN":  2,
+		"title":               "Persistent interstitial",
+	})
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Notifications []NotificationPayload `json:"notifications"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(resp.Notifications))
+	}
+
+	notification, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("id = ?", resp.Notifications[0].ID).
+		First(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load notification: %v", err)
+	}
+	if !notification.InterstitialForever {
+		t.Fatalf("expected interstitialForever true")
+	}
+	if notification.EndsAt != nil || notification.InterstitialUntil != nil {
+		t.Fatalf("expected interstitialForever notification to have no ends_at or interstitial_until")
+	}
+	if notification.InterstitialEveryN == nil || *notification.InterstitialEveryN != 2 {
+		t.Fatalf("expected interstitialEveryN=2, got %v", notification.InterstitialEveryN)
+	}
+
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("managed_by_notif = ?", notification.ID).
+		Find(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load overrides: %v", err)
+	}
+	if len(overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(overrides))
+	}
+	if overrides[0].Kind != data.OverrideInterstitial {
+		t.Fatalf("expected interstitial override, got %s", overrides[0].Kind)
+	}
+	if overrides[0].EndsAt != nil {
+		t.Fatalf("expected interstitial override to have no ends_at")
+	}
+	if overrides[0].EveryN == nil || *overrides[0].EveryN != 2 {
+		t.Fatalf("expected override everyN=2, got %v", overrides[0].EveryN)
+	}
+}
+
 func TestHandleCreateNotification_DedupeKey(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "device_api_key"
