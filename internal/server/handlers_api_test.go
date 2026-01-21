@@ -1082,13 +1082,13 @@ func TestHandleCreateNotification_Text(t *testing.T) {
 	}
 }
 
-func TestHandleCreateNotification_PinForever(t *testing.T) {
+func TestHandleCreateNotification_PinSticky(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "device_api_key"
 
 	body, _ := json.Marshal(map[string]any{
-		"pinForever": true,
-		"title":      "Persistent pin",
+		"mode":  "pin-sticky",
+		"title": "Persistent pin",
 	})
 	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
 	rr := httptest.NewRecorder()
@@ -1114,11 +1114,11 @@ func TestHandleCreateNotification_PinForever(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to load notification: %v", err)
 	}
-	if !notification.PinForever {
-		t.Fatalf("expected pinForever true")
+	if notification.Mode != "pin-sticky" {
+		t.Fatalf("expected mode pin-sticky, got %s", notification.Mode)
 	}
-	if notification.EndsAt != nil || notification.PinUntil != nil {
-		t.Fatalf("expected pinForever notification to have no ends_at or pin_until")
+	if notification.EndsAt != nil || notification.PinUntil != nil || notification.InterstitialUntil != nil {
+		t.Fatalf("expected pin-sticky notification to have no ends_at or pin/interstitial_until")
 	}
 
 	overrides, err := gorm.G[data.DeviceOverride](s.DB).
@@ -1138,14 +1138,14 @@ func TestHandleCreateNotification_PinForever(t *testing.T) {
 	}
 }
 
-func TestHandleCreateNotification_InterstitialForever(t *testing.T) {
+func TestHandleCreateNotification_InterstitialSticky(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "device_api_key"
 
 	body, _ := json.Marshal(map[string]any{
-		"interstitialForever": true,
-		"interstitialEveryN":  2,
-		"title":               "Persistent interstitial",
+		"mode":               "interstitial-sticky",
+		"interstitialEveryN": 2,
+		"title":              "Persistent interstitial",
 	})
 	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
 	rr := httptest.NewRecorder()
@@ -1171,11 +1171,11 @@ func TestHandleCreateNotification_InterstitialForever(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to load notification: %v", err)
 	}
-	if !notification.InterstitialForever {
-		t.Fatalf("expected interstitialForever true")
+	if notification.Mode != "interstitial-sticky" {
+		t.Fatalf("expected mode interstitial-sticky, got %s", notification.Mode)
 	}
-	if notification.EndsAt != nil || notification.InterstitialUntil != nil {
-		t.Fatalf("expected interstitialForever notification to have no ends_at or interstitial_until")
+	if notification.EndsAt != nil || notification.InterstitialUntil != nil || notification.PinUntil != nil {
+		t.Fatalf("expected interstitial-sticky notification to have no ends_at or pin/interstitial_until")
 	}
 	if notification.InterstitialEveryN == nil || *notification.InterstitialEveryN != 2 {
 		t.Fatalf("expected interstitialEveryN=2, got %v", notification.InterstitialEveryN)

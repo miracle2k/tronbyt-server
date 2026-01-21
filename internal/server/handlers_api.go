@@ -99,33 +99,31 @@ type OverridePayload struct {
 
 // NotificationCreateRequest represents a request to create a device notification.
 type NotificationCreateRequest struct {
-	Priority            *int   `json:"priority"`
-	PinForSec           *int   `json:"pinForSec"`
-	PinForever          bool   `json:"pinForever"`
-	InterstitialForSec  *int   `json:"interstitialForSec"`
-	InterstitialForever bool   `json:"interstitialForever"`
-	InterstitialEveryN  *int   `json:"interstitialEveryN"`
-	Source              string `json:"source"`
-	Key                 string `json:"key"`
-	Title               string `json:"title"`
-	Subtitle            string `json:"subtitle"`
-	Subtitle2           string `json:"subtitle2"`
-	Icon                string `json:"icon"`
-	Image               string `json:"image"`
+	Mode               string `json:"mode"`
+	Priority           *int   `json:"priority"`
+	PinForSec          *int   `json:"pinForSec"`
+	InterstitialForSec *int   `json:"interstitialForSec"`
+	InterstitialEveryN *int   `json:"interstitialEveryN"`
+	Source             string `json:"source"`
+	Key                string `json:"key"`
+	Title              string `json:"title"`
+	Subtitle           string `json:"subtitle"`
+	Subtitle2          string `json:"subtitle2"`
+	Icon               string `json:"icon"`
+	Image              string `json:"image"`
 }
 
 type NotificationPayload struct {
-	ID                  string  `json:"id"`
-	Source              *string `json:"source,omitempty"`
-	Key                 *string `json:"key,omitempty"`
-	Priority            int     `json:"priority"`
-	PinForever          bool    `json:"pinForever,omitempty"`
-	PinUntil            *string `json:"pinUntil,omitempty"`
-	InterstitialForever bool    `json:"interstitialForever,omitempty"`
-	InterstitialEveryN  *int    `json:"interstitialEveryN,omitempty"`
-	InterstitialUntil   *string `json:"interstitialUntil,omitempty"`
-	EndsAt              *string `json:"endsAt,omitempty"`
-	CreatedAt           string  `json:"createdAt"`
+	ID                 string  `json:"id"`
+	Source             *string `json:"source,omitempty"`
+	Key                *string `json:"key,omitempty"`
+	Mode               string  `json:"mode"`
+	Priority           int     `json:"priority"`
+	PinUntil           *string `json:"pinUntil,omitempty"`
+	InterstitialEveryN *int    `json:"interstitialEveryN,omitempty"`
+	InterstitialUntil  *string `json:"interstitialUntil,omitempty"`
+	EndsAt             *string `json:"endsAt,omitempty"`
+	CreatedAt          string  `json:"createdAt"`
 }
 
 // DeviceInfo represents device firmware and protocol information in the API payload.
@@ -463,17 +461,16 @@ func (s *Server) toNotificationPayload(n *data.DeviceNotification) NotificationP
 	createdAt := n.CreatedAt.Format(time.RFC3339)
 
 	return NotificationPayload{
-		ID:                  n.ID,
-		Source:              n.Source,
-		Key:                 n.Key,
-		Priority:            n.Priority,
-		PinForever:          n.PinForever,
-		PinUntil:            pinUntil,
-		InterstitialForever: n.InterstitialForever,
-		InterstitialEveryN:  n.InterstitialEveryN,
-		InterstitialUntil:   interstitialUntil,
-		EndsAt:              endsAt,
-		CreatedAt:           createdAt,
+		ID:                 n.ID,
+		Source:             n.Source,
+		Key:                n.Key,
+		Mode:               n.Mode,
+		Priority:           n.Priority,
+		PinUntil:           pinUntil,
+		InterstitialEveryN: n.InterstitialEveryN,
+		InterstitialUntil:  interstitialUntil,
+		EndsAt:             endsAt,
+		CreatedAt:          createdAt,
 	}
 }
 
@@ -777,38 +774,27 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		priority = *req.Priority
 	}
 
+	mode := strings.TrimSpace(req.Mode)
+	if mode == "" {
+		mode = "expiring"
+	}
+	switch mode {
+	case "expiring", "pin-sticky", "interstitial-sticky":
+	default:
+		http.Error(w, "Invalid mode", http.StatusBadRequest)
+		return
+	}
+
 	pinForSec := 0
 	if req.PinForSec != nil {
 		pinForSec = *req.PinForSec
 	}
-	pinForever := req.PinForever
 	interstitialForSec := 0
 	if req.InterstitialForSec != nil {
 		interstitialForSec = *req.InterstitialForSec
 	}
-	interstitialForever := req.InterstitialForever
 	if pinForSec < 0 || interstitialForSec < 0 {
 		http.Error(w, "Durations must be >= 0", http.StatusBadRequest)
-		return
-	}
-	if pinForever && interstitialForever {
-		http.Error(w, "Only one of pinForever or interstitialForever may be set", http.StatusBadRequest)
-		return
-	}
-	if pinForever && pinForSec > 0 {
-		http.Error(w, "pinForever cannot be combined with pinForSec", http.StatusBadRequest)
-		return
-	}
-	if pinForever && interstitialForSec > 0 {
-		http.Error(w, "pinForever cannot be combined with interstitialForSec", http.StatusBadRequest)
-		return
-	}
-	if interstitialForever && interstitialForSec > 0 {
-		http.Error(w, "interstitialForever cannot be combined with interstitialForSec", http.StatusBadRequest)
-		return
-	}
-	if interstitialForever && pinForSec > 0 {
-		http.Error(w, "interstitialForever cannot be combined with pinForSec", http.StatusBadRequest)
 		return
 	}
 	if req.InterstitialEveryN != nil {
@@ -816,14 +802,31 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 			http.Error(w, "interstitialEveryN must be > 0", http.StatusBadRequest)
 			return
 		}
-		if !interstitialForever {
-			http.Error(w, "interstitialEveryN is only supported with interstitialForever", http.StatusBadRequest)
+	}
+	switch mode {
+	case "expiring":
+		if req.InterstitialEveryN != nil {
+			http.Error(w, "interstitialEveryN is only supported with interstitial-sticky", http.StatusBadRequest)
 			return
 		}
-	}
-	if pinForSec == 0 && interstitialForSec == 0 && !pinForever && !interstitialForever {
-		http.Error(w, "At least one duration must be > 0", http.StatusBadRequest)
-		return
+		if pinForSec == 0 && interstitialForSec == 0 {
+			http.Error(w, "At least one duration must be > 0", http.StatusBadRequest)
+			return
+		}
+	case "pin-sticky":
+		if pinForSec > 0 || interstitialForSec > 0 {
+			http.Error(w, "pin-sticky does not accept durations", http.StatusBadRequest)
+			return
+		}
+		if req.InterstitialEveryN != nil {
+			http.Error(w, "interstitialEveryN is only supported with interstitial-sticky", http.StatusBadRequest)
+			return
+		}
+	case "interstitial-sticky":
+		if pinForSec > 0 || interstitialForSec > 0 {
+			http.Error(w, "interstitial-sticky does not accept durations", http.StatusBadRequest)
+			return
+		}
 	}
 
 	notificationID, err := generateSecureToken(12)
@@ -834,46 +837,46 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 
 	now := time.Now()
 	var pinUntil *time.Time
-	if pinForSec > 0 && !pinForever {
-		end := now.Add(time.Duration(pinForSec) * time.Second)
-		pinUntil = &end
-	}
-
-	interstitialStart := now
-	if pinUntil != nil {
-		interstitialStart = *pinUntil
-	}
 	var interstitialUntil *time.Time
-	if interstitialForSec > 0 && !interstitialForever {
-		end := interstitialStart.Add(time.Duration(interstitialForSec) * time.Second)
-		interstitialUntil = &end
-	}
-
+	interstitialStart := now
 	var endsAt *time.Time
-	switch {
-	case interstitialUntil != nil && (pinUntil == nil || interstitialUntil.After(*pinUntil)):
-		endsAt = interstitialUntil
-	case pinUntil != nil:
-		endsAt = pinUntil
+	if mode == "expiring" {
+		if pinForSec > 0 {
+			end := now.Add(time.Duration(pinForSec) * time.Second)
+			pinUntil = &end
+		}
+		if pinUntil != nil {
+			interstitialStart = *pinUntil
+		}
+		if interstitialForSec > 0 {
+			end := interstitialStart.Add(time.Duration(interstitialForSec) * time.Second)
+			interstitialUntil = &end
+		}
+
+		switch {
+		case interstitialUntil != nil && (pinUntil == nil || interstitialUntil.After(*pinUntil)):
+			endsAt = interstitialUntil
+		case pinUntil != nil:
+			endsAt = pinUntil
+		}
 	}
 
 	notification := data.DeviceNotification{
-		ID:                  notificationID,
-		DeviceID:            device.ID,
-		Source:              sourcePtr,
-		Key:                 keyPtr,
-		Priority:            priority,
-		PinForever:          pinForever,
-		PinUntil:            pinUntil,
-		InterstitialForever: interstitialForever,
-		InterstitialEveryN:  req.InterstitialEveryN,
-		InterstitialUntil:   interstitialUntil,
-		EndsAt:              endsAt,
-		CreatedAt:           now,
+		ID:                 notificationID,
+		DeviceID:           device.ID,
+		Source:             sourcePtr,
+		Key:                keyPtr,
+		Mode:               mode,
+		Priority:           priority,
+		PinUntil:           pinUntil,
+		InterstitialUntil:  interstitialUntil,
+		InterstitialEveryN: nil,
+		EndsAt:             endsAt,
+		CreatedAt:          now,
 	}
 
 	var overrides []data.DeviceOverride
-	if pinUntil != nil || pinForever {
+	if (mode == "expiring" && pinUntil != nil) || mode == "pin-sticky" {
 		overrideID, err := generateSecureToken(12)
 		if err != nil {
 			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
@@ -891,15 +894,18 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		}
 		overrides = append(overrides, ov)
 	}
-	if interstitialUntil != nil || interstitialForever {
+	if (mode == "expiring" && interstitialUntil != nil) || mode == "interstitial-sticky" {
 		overrideID, err := generateSecureToken(12)
 		if err != nil {
 			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
 			return
 		}
 		everyN := 1
-		if interstitialForever && req.InterstitialEveryN != nil {
+		if mode == "interstitial-sticky" && req.InterstitialEveryN != nil {
 			everyN = *req.InterstitialEveryN
+		}
+		if mode == "interstitial-sticky" {
+			notification.InterstitialEveryN = &everyN
 		}
 		ov := data.DeviceOverride{
 			ID:             overrideID,

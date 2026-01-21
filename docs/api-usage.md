@@ -18,7 +18,10 @@ Notifications are high-level, short-lived messages. They can be created from:
 - A base64 WebP image (`image`), or
 - Text fields (`title`, optional `subtitle` and `subtitle2`), which the server renders.
 
-At least one of `pinForSec` or `interstitialForSec` must be > 0.
+`mode` options:
+- `expiring` (default): use `pinForSec` and/or `interstitialForSec`.
+- `pin-sticky`: stays pinned until deleted.
+- `interstitial-sticky`: stays interstitial until deleted (`interstitialEveryN` optional).
 
 ### Create (text notification)
 ```bash
@@ -33,6 +36,34 @@ curl -sS -X POST "$SERVER/v0/devices/$DEVICE_ID/notifications" \
     "interstitialForSec":900,
     "source":"homeassistant",
     "key":"dishwasher_done"
+  }'
+```
+
+### Create (persistent pinned notification)
+```bash
+curl -sS -X POST "$SERVER/v0/devices/$DEVICE_ID/notifications" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":"Dishwasher done",
+    "subtitle":"Kitchen",
+    "mode":"pin-sticky",
+    "source":"homeassistant",
+    "key":"dishwasher_done"
+  }'
+```
+
+### Create (persistent interstitial notification)
+```bash
+curl -sS -X POST "$SERVER/v0/devices/$DEVICE_ID/notifications" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":"Laundry done",
+    "mode":"interstitial-sticky",
+    "interstitialEveryN":2,
+    "source":"homeassistant",
+    "key":"laundry_done"
   }'
 ```
 
@@ -72,6 +103,8 @@ Notes:
 - `source` + `key` is optional but recommended. It lets you update/delete without tracking IDs.
 - `priority` is optional; higher wins if multiple notifications overlap.
 - During night mode, only overrides with priority >= 100 are eligible.
+- `mode` defaults to `expiring`, which uses `pinForSec` and/or `interstitialForSec`.
+- `interstitialEveryN` is only valid with `interstitial-sticky` (default is 1 = every gap).
 
 ## Overrides
 

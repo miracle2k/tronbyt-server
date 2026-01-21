@@ -575,11 +575,10 @@ type DeviceNotification struct {
 	DeviceID            string     `gorm:"index;index:uniq_device_notif_key,unique" json:"device_id"`
 	Source              *string    `gorm:"index:uniq_device_notif_key,unique"       json:"source"`
 	Key                 *string    `gorm:"index:uniq_device_notif_key,unique"       json:"key"`
+	Mode                string     `gorm:"type:text"                                json:"mode"`
 	Priority            int        `json:"priority"`
 	PinUntil            *time.Time `json:"pin_until"`
-	PinForever          bool       `json:"pin_forever"`
 	InterstitialUntil   *time.Time `json:"interstitial_until"`
-	InterstitialForever bool       `json:"interstitial_forever"`
 	InterstitialEveryN  *int       `json:"interstitial_every_n"`
 	EndsAt              *time.Time `json:"ends_at"`
 	CreatedAt           time.Time  `json:"created_at"`
