@@ -28,8 +28,12 @@ rest_command:
       {"title":"{{ title }}",
        "subtitle":"{{ subtitle }}",
        "subtitle2":"{{ subtitle2 }}",
+       "mode":"{{ mode | default('expiring') }}",
        "pinForSec":{{ pin_for_sec|default(300) }},
        "interstitialForSec":{{ interstitial_for_sec|default(900) }},
+       {% if (mode | default('expiring')) == "interstitial-sticky" %}
+       "interstitialEveryN":{{ interstitial_every_n|default(1) }},
+       {% endif %}
        "source":"homeassistant","key":"{{ key }}"}
 ```
 
@@ -58,6 +62,7 @@ interstitial_for_sec: 900
 title: "Dishwasher done"
 subtitle: "Kitchen"
 key: "dishwasher_done"
+mode: "pin-sticky"
 pin_for_sec: 0
 interstitial_for_sec: 0
 ```
@@ -67,11 +72,13 @@ interstitial_for_sec: 0
 ```yaml
 title: "Laundry done"
 key: "laundry_done"
+mode: "interstitial-sticky"
+interstitial_every_n: 2
 pin_for_sec: 0
 interstitial_for_sec: 0
 ```
 
-Note: To use `mode` (`pin-sticky` / `interstitial-sticky`) or `interstitialEveryN`, add those fields to the rest_command payload above. For sticky modes, keep `pin_for_sec` and `interstitial_for_sec` at `0` so the API doesn't receive durations.
+Note: The payload defaults to `mode: expiring`. For sticky modes, keep `pin_for_sec` and `interstitial_for_sec` at `0` so the API doesn't receive durations.
 
 ## 4) Use it in an automation
 
@@ -97,18 +104,22 @@ script:
       title:
       subtitle:
       subtitle2:
+      mode:
       key:
       pin_for_sec:
       interstitial_for_sec:
+      interstitial_every_n:
     sequence:
       - service: rest_command.tronbyt_notify
         data:
           title: "{{ title }}"
           subtitle: "{{ subtitle }}"
           subtitle2: "{{ subtitle2 }}"
+          mode: "{{ mode | default('expiring') }}"
           key: "{{ key }}"
           pin_for_sec: "{{ pin_for_sec | default(300) }}"
           interstitial_for_sec: "{{ interstitial_for_sec | default(900) }}"
+          interstitial_every_n: "{{ interstitial_every_n | default(1) }}"
 ```
 
 Then call it from an automation:
