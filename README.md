@@ -10,10 +10,19 @@ This fork adds **short‑lived, API‑driven messaging** for devices:
 - **Pin → interstitial flow**: notifications can start pinned, then continue as interstitials for a defined period.
 - **Priority support**: lets urgent messages win when multiple notifications overlap.
 
+Try it with the current fork image:
+`ghcr.io/miracle2k/tronbyt-server:2.1.1-fork.4` (tag `v2.1.1-fork.4`).
+
 Start here:
 
 - API usage: https://github.com/miracle2k/tronbyt-server/blob/main/docs/api-usage.md
 - Home Assistant usage: https://github.com/miracle2k/tronbyt-server/blob/main/docs/homeassistant-usage.md
+
+### Implementation notes
+
+Documenting some design decisions here:
+
+- The duration properties for overwrites/notifications are a minimum. An app or notification will not interrupt it's on `displayTime`; so a notification targeting 12s which a displayTime of 10s will be shown for 20s.
 
 ## Usage
 
