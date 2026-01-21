@@ -65,7 +65,7 @@ func (s *Server) updateNotificationInterstitial(ctx context.Context, device *dat
 	if notification.PinUntil != nil && notification.PinUntil.After(interstitialStart) {
 		interstitialStart = *notification.PinUntil
 	}
-	if now.Before(interstitialStart) || !now.Before(*notification.InterstitialUntil) {
+	if now.Before(interstitialStart) || now.After(*notification.InterstitialUntil) {
 		return
 	}
 
