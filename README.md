@@ -1,5 +1,20 @@
 # Tronbyt Server
 
+## Fork additions (overrides + notifications)
+
+This fork adds **short‑lived, API‑driven messaging** for devices:
+
+- **Overrides API**: low‑level “show this image now” controls (pinned or interstitial), with optional display time and frequency.
+- **Notifications API**: higher‑level messages that can be **text‑rendered** (title/subtitle/icon) or **raw WebP**, with
+  optional `source` + `key` **dedupe** so integrations can update/delete without tracking IDs.
+- **Pin → interstitial flow**: notifications can start pinned, then continue as interstitials for a defined period.
+- **Priority support**: lets urgent messages win when multiple notifications overlap.
+
+Start here:
+
+- API usage: https://github.com/miracle2k/tronbyt-server/blob/main/docs/api-usage.md
+- Home Assistant usage: https://github.com/miracle2k/tronbyt-server/blob/main/docs/homeassistant-usage.md
+
 ## Usage
 
 - API usage: https://github.com/miracle2k/tronbyt-server/blob/main/docs/api-usage.md
