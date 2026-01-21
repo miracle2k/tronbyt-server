@@ -28,6 +28,11 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebp-dev
+
       - name: Verify dependencies
         run: go mod verify
 

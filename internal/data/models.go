@@ -547,6 +547,43 @@ type App struct {
 	ColorFilter     *ColorFilter `json:"color_filter"`
 }
 
+type OverrideKind string
+
+const (
+	OverridePinned       OverrideKind = "pinned"
+	OverrideInterstitial OverrideKind = "interstitial"
+)
+
+type DeviceOverride struct {
+	ID             string       `gorm:"primaryKey"       json:"id"`
+	DeviceID       string       `gorm:"index"            json:"device_id"`
+	Kind           OverrideKind `gorm:"type:text"        json:"kind"`
+	Priority       int          `json:"priority"`
+	StartsAt       *time.Time   `json:"starts_at"`
+	EndsAt         *time.Time   `json:"ends_at"`
+	DisplayTimeSec *int         `json:"display_time_sec"`
+	EveryN         *int         `json:"every_n"`
+	ImageKey       string       `json:"image_key"`
+	ManagedByNotif *string      `gorm:"index"            json:"-"`
+	LastServedAt   *time.Time   `json:"last_served_at"`
+	LastServedGap  *int         `json:"last_served_gap"`
+	CreatedAt      time.Time    `json:"created_at"`
+}
+
+type DeviceNotification struct {
+	ID                  string     `gorm:"primaryKey"                               json:"id"`
+	DeviceID            string     `gorm:"index;index:uniq_device_notif_key,unique" json:"device_id"`
+	Source              *string    `gorm:"index:uniq_device_notif_key,unique"       json:"source"`
+	Key                 *string    `gorm:"index:uniq_device_notif_key,unique"       json:"key"`
+	Mode                string     `gorm:"type:text"                                json:"mode"`
+	Priority            int        `json:"priority"`
+	PinUntil            *time.Time `json:"pin_until"`
+	InterstitialUntil   *time.Time `json:"interstitial_until"`
+	InterstitialEveryN  *int       `json:"interstitial_every_n"`
+	EndsAt              *time.Time `json:"ends_at"`
+	CreatedAt           time.Time  `json:"created_at"`
+}
+
 type Device struct {
 	ID                    string      `gorm:"primaryKey"              json:"id"` // 8-char hex
 	Username              string      `gorm:"index"                   json:"username"`

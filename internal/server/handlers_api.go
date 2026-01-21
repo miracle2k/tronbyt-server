@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"tronbyt-server/internal/apps"
@@ -71,6 +73,57 @@ type DimMode struct {
 type Interstitial struct {
 	Enabled bool    `json:"enabled"`
 	App     *string `json:"app"`
+}
+
+// OverrideCreateRequest represents a request to create a device override.
+type OverrideCreateRequest struct {
+	Kind           string `json:"kind"`
+	Priority       *int   `json:"priority"`
+	DurationSec    *int   `json:"durationSec"`
+	DisplayTimeSec *int   `json:"displayTimeSec"`
+	EveryN         *int   `json:"everyN"`
+	Image          string `json:"image"`
+}
+
+type OverridePayload struct {
+	ID             string            `json:"id"`
+	Kind           data.OverrideKind `json:"kind"`
+	Priority       int               `json:"priority"`
+	StartsAt       *string           `json:"startsAt,omitempty"`
+	EndsAt         *string           `json:"endsAt,omitempty"`
+	DisplayTimeSec *int              `json:"displayTimeSec,omitempty"`
+	EveryN         *int              `json:"everyN,omitempty"`
+	LastServedAt   *string           `json:"lastServedAt,omitempty"`
+	CreatedAt      string            `json:"createdAt"`
+}
+
+// NotificationCreateRequest represents a request to create a device notification.
+type NotificationCreateRequest struct {
+	Mode               string `json:"mode"`
+	Priority           *int   `json:"priority"`
+	PinForSec          *int   `json:"pinForSec"`
+	InterstitialForSec *int   `json:"interstitialForSec"`
+	InterstitialEveryN *int   `json:"interstitialEveryN"`
+	Source             string `json:"source"`
+	Key                string `json:"key"`
+	Title              string `json:"title"`
+	Subtitle           string `json:"subtitle"`
+	Subtitle2          string `json:"subtitle2"`
+	Icon               string `json:"icon"`
+	Image              string `json:"image"`
+}
+
+type NotificationPayload struct {
+	ID                 string  `json:"id"`
+	Source             *string `json:"source,omitempty"`
+	Key                *string `json:"key,omitempty"`
+	Mode               string  `json:"mode"`
+	Priority           int     `json:"priority"`
+	PinUntil           *string `json:"pinUntil,omitempty"`
+	InterstitialEveryN *int    `json:"interstitialEveryN,omitempty"`
+	InterstitialUntil  *string `json:"interstitialUntil,omitempty"`
+	EndsAt             *string `json:"endsAt,omitempty"`
+	CreatedAt          string  `json:"createdAt"`
 }
 
 // DeviceInfo represents device firmware and protocol information in the API payload.
@@ -341,6 +394,651 @@ func (s *Server) handleGetInstallation(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(s.toAppPayload(device, app)); err != nil {
 		slog.Error("Failed to encode app JSON", "error", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func parseOverrideKind(raw string) (data.OverrideKind, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(data.OverridePinned):
+		return data.OverridePinned, true
+	case string(data.OverrideInterstitial):
+		return data.OverrideInterstitial, true
+	default:
+		return "", false
+	}
+}
+
+func (s *Server) toOverridePayload(ov *data.DeviceOverride) OverridePayload {
+	var startsAt *string
+	if ov.StartsAt != nil {
+		iso := ov.StartsAt.Format(time.RFC3339)
+		startsAt = &iso
+	}
+
+	var endsAt *string
+	if ov.EndsAt != nil {
+		iso := ov.EndsAt.Format(time.RFC3339)
+		endsAt = &iso
+	}
+
+	var lastServedAt *string
+	if ov.LastServedAt != nil {
+		iso := ov.LastServedAt.Format(time.RFC3339)
+		lastServedAt = &iso
+	}
+
+	createdAt := ov.CreatedAt.Format(time.RFC3339)
+
+	return OverridePayload{
+		ID:             ov.ID,
+		Kind:           ov.Kind,
+		Priority:       ov.Priority,
+		StartsAt:       startsAt,
+		EndsAt:         endsAt,
+		DisplayTimeSec: ov.DisplayTimeSec,
+		EveryN:         ov.EveryN,
+		LastServedAt:   lastServedAt,
+		CreatedAt:      createdAt,
+	}
+}
+
+func (s *Server) toNotificationPayload(n *data.DeviceNotification) NotificationPayload {
+	var pinUntil *string
+	if n.PinUntil != nil {
+		iso := n.PinUntil.Format(time.RFC3339)
+		pinUntil = &iso
+	}
+	var interstitialUntil *string
+	if n.InterstitialUntil != nil {
+		iso := n.InterstitialUntil.Format(time.RFC3339)
+		interstitialUntil = &iso
+	}
+	var endsAt *string
+	if n.EndsAt != nil {
+		iso := n.EndsAt.Format(time.RFC3339)
+		endsAt = &iso
+	}
+	createdAt := n.CreatedAt.Format(time.RFC3339)
+
+	return NotificationPayload{
+		ID:                 n.ID,
+		Source:             n.Source,
+		Key:                n.Key,
+		Mode:               n.Mode,
+		Priority:           n.Priority,
+		PinUntil:           pinUntil,
+		InterstitialEveryN: n.InterstitialEveryN,
+		InterstitialUntil:  interstitialUntil,
+		EndsAt:             endsAt,
+		CreatedAt:          createdAt,
+	}
+}
+
+func (s *Server) handleListOverrides(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+
+	s.cleanupExpiredOverrides(r.Context(), device.ID)
+
+	now := time.Now()
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("device_id = ?", device.ID).
+		Where("(starts_at IS NULL OR starts_at <= ?)", now).
+		Where("(ends_at IS NULL OR ends_at > ?)", now).
+		Where("managed_by_notif IS NULL").
+		Order("priority DESC, created_at DESC").
+		Find(r.Context())
+	if err != nil {
+		http.Error(w, "Failed to list overrides", http.StatusInternalServerError)
+		return
+	}
+
+	payloads := make([]OverridePayload, 0, len(overrides))
+	for i := range overrides {
+		payloads = append(payloads, s.toOverridePayload(&overrides[i]))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"overrides": payloads}); err != nil {
+		slog.Error("Failed to encode overrides JSON", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+
+	var req OverrideCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(req.Image) == "" {
+		http.Error(w, "Missing image", http.StatusBadRequest)
+		return
+	}
+
+	imageStr := req.Image
+	if strings.HasPrefix(strings.ToLower(imageStr), "data:") {
+		if idx := strings.Index(imageStr, ","); idx >= 0 {
+			imageStr = imageStr[idx+1:]
+		}
+	}
+
+	imgBytes, err := base64.StdEncoding.DecodeString(imageStr)
+	if err != nil || len(imgBytes) == 0 {
+		http.Error(w, "Invalid Base64 Image", http.StatusBadRequest)
+		return
+	}
+
+	priority := 0
+	if req.Priority != nil {
+		priority = *req.Priority
+	}
+
+	if strings.TrimSpace(req.Kind) == "" {
+		http.Error(w, "Missing override kind", http.StatusBadRequest)
+		return
+	}
+
+	kind, ok := parseOverrideKind(req.Kind)
+	if !ok {
+		http.Error(w, "Invalid override kind", http.StatusBadRequest)
+		return
+	}
+
+	durationSec := 0
+	if req.DurationSec != nil {
+		durationSec = *req.DurationSec
+	}
+	if durationSec < 0 {
+		http.Error(w, "Duration must be >= 0", http.StatusBadRequest)
+		return
+	}
+
+	if req.EveryN != nil {
+		if *req.EveryN <= 0 {
+			http.Error(w, "everyN must be > 0", http.StatusBadRequest)
+			return
+		}
+		if kind != data.OverrideInterstitial {
+			http.Error(w, "everyN is only supported for interstitial overrides", http.StatusBadRequest)
+			return
+		}
+	}
+
+	overrideID, err := generateSecureToken(12)
+	if err != nil {
+		http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
+		return
+	}
+
+	now := time.Now()
+	startsAt := &now
+	var endsAt *time.Time
+	if durationSec > 0 {
+		end := now.Add(time.Duration(durationSec) * time.Second)
+		endsAt = &end
+	}
+
+	ov := data.DeviceOverride{
+		ID:             overrideID,
+		DeviceID:       device.ID,
+		Kind:           kind,
+		Priority:       priority,
+		StartsAt:       startsAt,
+		EndsAt:         endsAt,
+		DisplayTimeSec: req.DisplayTimeSec,
+		EveryN:         req.EveryN,
+		ImageKey:       overrideID,
+	}
+
+	if err := gorm.G[data.DeviceOverride](s.DB).Create(r.Context(), &ov); err != nil {
+		http.Error(w, "Failed to create override", http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.saveOverrideImage(device.ID, overrideID, imgBytes); err != nil {
+		slog.Error("Failed to save override image", "override_id", overrideID, "error", err)
+		s.deleteOverride(r.Context(), &ov)
+		http.Error(w, "Failed to save override image", http.StatusInternalServerError)
+		return
+	}
+
+	payloads := []OverridePayload{s.toOverridePayload(&ov)}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"overrides": payloads}); err != nil {
+		slog.Error("Failed to encode overrides JSON", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleDeleteOverride(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	overrideID := r.PathValue("overrideId")
+	if overrideID == "" {
+		http.Error(w, "Override not found", http.StatusNotFound)
+		return
+	}
+
+	ov, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("id = ? AND device_id = ?", overrideID, device.ID).
+		First(r.Context())
+	if err != nil {
+		http.Error(w, "Override not found", http.StatusNotFound)
+		return
+	}
+	if ov.ManagedByNotif != nil {
+		http.Error(w, "Managed overrides cannot be deleted", http.StatusForbidden)
+		return
+	}
+
+	s.deleteOverride(r.Context(), &ov)
+
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("Override deleted.")); err != nil {
+		slog.Error("Failed to write response", "error", err)
+	}
+}
+
+func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+
+	s.cleanupExpiredNotifications(r.Context(), device.ID)
+
+	now := time.Now()
+	notifications, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("device_id = ?", device.ID).
+		Where("(ends_at IS NULL OR ends_at > ?)", now).
+		Order("created_at DESC").
+		Find(r.Context())
+	if err != nil {
+		http.Error(w, "Failed to list notifications", http.StatusInternalServerError)
+		return
+	}
+
+	payloads := make([]NotificationPayload, 0, len(notifications))
+	for i := range notifications {
+		payloads = append(payloads, s.toNotificationPayload(&notifications[i]))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"notifications": payloads}); err != nil {
+		slog.Error("Failed to encode notifications JSON", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+
+	var req NotificationCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	trimTitle := strings.TrimSpace(req.Title)
+	trimSubtitle := strings.TrimSpace(req.Subtitle)
+	trimSubtitle2 := strings.TrimSpace(req.Subtitle2)
+	trimIcon := strings.TrimSpace(req.Icon)
+	trimImage := strings.TrimSpace(req.Image)
+	trimSource := strings.TrimSpace(req.Source)
+	trimKey := strings.TrimSpace(req.Key)
+
+	hasText := trimTitle != ""
+	hasImage := trimImage != ""
+	hasKey := trimSource != "" || trimKey != ""
+
+	var sourcePtr, keyPtr *string
+	if hasKey {
+		if trimSource == "" || trimKey == "" {
+			http.Error(w, "Both source and key are required when using a notification key", http.StatusBadRequest)
+			return
+		}
+		sourcePtr = &trimSource
+		keyPtr = &trimKey
+	}
+
+	if !hasText && (trimSubtitle != "" || trimSubtitle2 != "" || trimIcon != "") {
+		http.Error(w, "Title is required for text notifications", http.StatusBadRequest)
+		return
+	}
+	if hasText && hasImage {
+		http.Error(w, "Provide either title or image, not both", http.StatusBadRequest)
+		return
+	}
+	if !hasText && !hasImage {
+		http.Error(w, "Missing image or title", http.StatusBadRequest)
+		return
+	}
+
+	var existingNotification *data.DeviceNotification
+	if sourcePtr != nil {
+		existing, err := gorm.G[data.DeviceNotification](s.DB).
+			Where(&data.DeviceNotification{DeviceID: device.ID, Source: sourcePtr, Key: keyPtr}).
+			First(r.Context())
+		if err == nil {
+			existingNotification = &existing
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "Failed to check existing notifications", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	decodeBase64Payload := func(raw string) ([]byte, error) {
+		imageStr := strings.TrimSpace(raw)
+		if strings.HasPrefix(strings.ToLower(imageStr), "data:") {
+			if idx := strings.Index(imageStr, ","); idx >= 0 {
+				imageStr = imageStr[idx+1:]
+			}
+		}
+		imgBytes, err := base64.StdEncoding.DecodeString(imageStr)
+		if err != nil || len(imgBytes) == 0 {
+			return nil, fmt.Errorf("invalid base64 image")
+		}
+		return imgBytes, nil
+	}
+
+	var imgBytes []byte
+	if hasText {
+		iconB64 := ""
+		if trimIcon != "" {
+			iconBytes, err := decodeBase64Payload(trimIcon)
+			if err != nil {
+				http.Error(w, "Invalid Base64 Icon", http.StatusBadRequest)
+				return
+			}
+			iconB64 = base64.StdEncoding.EncodeToString(iconBytes)
+		}
+
+		rendered, err := s.renderNotificationImage(r.Context(), device, trimTitle, trimSubtitle, trimSubtitle2, iconB64)
+		if err != nil {
+			slog.Error("Failed to render notification", "error", err)
+			http.Error(w, "Failed to render notification", http.StatusInternalServerError)
+			return
+		}
+		imgBytes = rendered
+	} else {
+		var err error
+		imgBytes, err = decodeBase64Payload(trimImage)
+		if err != nil {
+			http.Error(w, "Invalid Base64 Image", http.StatusBadRequest)
+			return
+		}
+	}
+
+	priority := 0
+	if req.Priority != nil {
+		priority = *req.Priority
+	}
+
+	mode := strings.TrimSpace(req.Mode)
+	if mode == "" {
+		mode = "expiring"
+	}
+	switch mode {
+	case "expiring", "pin-sticky", "interstitial-sticky":
+	default:
+		http.Error(w, "Invalid mode", http.StatusBadRequest)
+		return
+	}
+
+	pinForSec := 0
+	if req.PinForSec != nil {
+		pinForSec = *req.PinForSec
+	}
+	interstitialForSec := 0
+	if req.InterstitialForSec != nil {
+		interstitialForSec = *req.InterstitialForSec
+	}
+	if pinForSec < 0 || interstitialForSec < 0 {
+		http.Error(w, "Durations must be >= 0", http.StatusBadRequest)
+		return
+	}
+	if req.InterstitialEveryN != nil {
+		if *req.InterstitialEveryN <= 0 {
+			http.Error(w, "interstitialEveryN must be > 0", http.StatusBadRequest)
+			return
+		}
+	}
+	switch mode {
+	case "expiring":
+		if req.InterstitialEveryN != nil {
+			http.Error(w, "interstitialEveryN is only supported with interstitial-sticky", http.StatusBadRequest)
+			return
+		}
+		if pinForSec == 0 && interstitialForSec == 0 {
+			http.Error(w, "At least one duration must be > 0", http.StatusBadRequest)
+			return
+		}
+	case "pin-sticky":
+		if pinForSec > 0 || interstitialForSec > 0 {
+			http.Error(w, "pin-sticky does not accept durations", http.StatusBadRequest)
+			return
+		}
+		if req.InterstitialEveryN != nil {
+			http.Error(w, "interstitialEveryN is only supported with interstitial-sticky", http.StatusBadRequest)
+			return
+		}
+	case "interstitial-sticky":
+		if pinForSec > 0 || interstitialForSec > 0 {
+			http.Error(w, "interstitial-sticky does not accept durations", http.StatusBadRequest)
+			return
+		}
+	}
+
+	notificationID, err := generateSecureToken(12)
+	if err != nil {
+		http.Error(w, "Failed to generate notification ID", http.StatusInternalServerError)
+		return
+	}
+
+	now := time.Now()
+	var pinUntil *time.Time
+	var interstitialUntil *time.Time
+	interstitialStart := now
+	var endsAt *time.Time
+	if mode == "expiring" {
+		if pinForSec > 0 {
+			end := now.Add(time.Duration(pinForSec) * time.Second)
+			pinUntil = &end
+		}
+		if pinUntil != nil {
+			interstitialStart = *pinUntil
+		}
+		if interstitialForSec > 0 {
+			end := interstitialStart.Add(time.Duration(interstitialForSec) * time.Second)
+			interstitialUntil = &end
+		}
+
+		switch {
+		case interstitialUntil != nil && (pinUntil == nil || interstitialUntil.After(*pinUntil)):
+			endsAt = interstitialUntil
+		case pinUntil != nil:
+			endsAt = pinUntil
+		}
+	}
+
+	notification := data.DeviceNotification{
+		ID:                 notificationID,
+		DeviceID:           device.ID,
+		Source:             sourcePtr,
+		Key:                keyPtr,
+		Mode:               mode,
+		Priority:           priority,
+		PinUntil:           pinUntil,
+		InterstitialUntil:  interstitialUntil,
+		InterstitialEveryN: nil,
+		EndsAt:             endsAt,
+		CreatedAt:          now,
+	}
+
+	var overrides []data.DeviceOverride
+	if (mode == "expiring" && pinUntil != nil) || mode == "pin-sticky" {
+		overrideID, err := generateSecureToken(12)
+		if err != nil {
+			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
+			return
+		}
+		ov := data.DeviceOverride{
+			ID:             overrideID,
+			DeviceID:       device.ID,
+			Kind:           data.OverridePinned,
+			Priority:       priority,
+			StartsAt:       &now,
+			EndsAt:         pinUntil,
+			ImageKey:       overrideID,
+			ManagedByNotif: &notificationID,
+		}
+		overrides = append(overrides, ov)
+	}
+	if (mode == "expiring" && interstitialUntil != nil) || mode == "interstitial-sticky" {
+		overrideID, err := generateSecureToken(12)
+		if err != nil {
+			http.Error(w, "Failed to generate override ID", http.StatusInternalServerError)
+			return
+		}
+		everyN := 1
+		if mode == "interstitial-sticky" && req.InterstitialEveryN != nil {
+			everyN = *req.InterstitialEveryN
+		}
+		if mode == "interstitial-sticky" {
+			notification.InterstitialEveryN = &everyN
+		}
+		ov := data.DeviceOverride{
+			ID:             overrideID,
+			DeviceID:       device.ID,
+			Kind:           data.OverrideInterstitial,
+			Priority:       priority,
+			StartsAt:       &interstitialStart,
+			EndsAt:         interstitialUntil,
+			EveryN:         &everyN,
+			ImageKey:       overrideID,
+			ManagedByNotif: &notificationID,
+		}
+		overrides = append(overrides, ov)
+	}
+
+	var oldOverrides []data.DeviceOverride
+	if existingNotification != nil {
+		oldOverrides, _ = gorm.G[data.DeviceOverride](s.DB).
+			Where("managed_by_notif = ?", existingNotification.ID).
+			Find(r.Context())
+	}
+
+	cleanupNewImages := func() {
+		for i := range overrides {
+			imageKey := overrides[i].ImageKey
+			if imageKey == "" {
+				imageKey = overrides[i].ID
+			}
+			s.deleteOverrideFile(device.ID, imageKey)
+		}
+	}
+
+	for i := range overrides {
+		if err := s.saveOverrideImage(device.ID, overrides[i].ImageKey, imgBytes); err != nil {
+			cleanupNewImages()
+			http.Error(w, "Failed to save override image", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if existingNotification != nil {
+			if _, err := gorm.G[data.DeviceOverride](tx).
+				Where("managed_by_notif = ?", existingNotification.ID).
+				Delete(r.Context()); err != nil {
+				return err
+			}
+			if _, err := gorm.G[data.DeviceNotification](tx).
+				Where("id = ?", existingNotification.ID).
+				Delete(r.Context()); err != nil {
+				return err
+			}
+		}
+
+		if err := gorm.G[data.DeviceNotification](tx).Create(r.Context(), &notification); err != nil {
+			return err
+		}
+		for i := range overrides {
+			ov := overrides[i]
+			if err := gorm.G[data.DeviceOverride](tx).Create(r.Context(), &ov); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		cleanupNewImages()
+		http.Error(w, "Failed to create notification", http.StatusInternalServerError)
+		return
+	}
+
+	for i := range oldOverrides {
+		imageKey := oldOverrides[i].ImageKey
+		if imageKey == "" {
+			imageKey = oldOverrides[i].ID
+		}
+		s.deleteOverrideFile(device.ID, imageKey)
+	}
+
+	payloads := []NotificationPayload{s.toNotificationPayload(&notification)}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"notifications": payloads}); err != nil {
+		slog.Error("Failed to encode notifications JSON", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleDeleteNotification(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	notificationID := r.PathValue("notificationId")
+	if notificationID == "" {
+		http.Error(w, "Notification not found", http.StatusNotFound)
+		return
+	}
+
+	notification, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("id = ? AND device_id = ?", notificationID, device.ID).
+		First(r.Context())
+	if err != nil {
+		http.Error(w, "Notification not found", http.StatusNotFound)
+		return
+	}
+
+	s.deleteNotification(r.Context(), &notification)
+
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("Notification deleted.")); err != nil {
+		slog.Error("Failed to write response", "error", err)
+	}
+}
+
+func (s *Server) handleDeleteNotificationByKey(w http.ResponseWriter, r *http.Request) {
+	device := GetDevice(r)
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if source == "" || key == "" {
+		http.Error(w, "Missing source or key", http.StatusBadRequest)
+		return
+	}
+
+	notification, err := gorm.G[data.DeviceNotification](s.DB).
+		Where(&data.DeviceNotification{DeviceID: device.ID, Source: &source, Key: &key}).
+		First(r.Context())
+	if err != nil {
+		http.Error(w, "Notification not found", http.StatusNotFound)
+		return
+	}
+
+	s.deleteNotification(r.Context(), &notification)
+
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("Notification deleted.")); err != nil {
+		slog.Error("Failed to write response", "error", err)
 	}
 }
 
@@ -742,6 +1440,13 @@ func (s *Server) SetupAPIRoutes() {
 	s.Router.Handle("POST /v0/devices/{id}/push_app", s.APIAuthMiddleware(s.RequireDevice(s.handlePushApp)))
 	s.Router.Handle("POST /v0/devices/{id}/update_firmware_settings", s.APIAuthMiddleware(s.RequireDevice(s.handleUpdateFirmwareSettingsAPI)))
 	s.Router.Handle("POST /v0/devices/{id}/reboot", s.APIAuthMiddleware(s.RequireDevice(s.handleRebootDeviceAPI)))
+	s.Router.Handle("GET /v0/devices/{id}/overrides", s.APIAuthMiddleware(s.RequireDevice(s.handleListOverrides)))
+	s.Router.Handle("POST /v0/devices/{id}/overrides", s.APIAuthMiddleware(s.RequireDevice(s.handleCreateOverride)))
+	s.Router.Handle("DELETE /v0/devices/{id}/overrides/{overrideId}", s.APIAuthMiddleware(s.RequireDevice(s.handleDeleteOverride)))
+	s.Router.Handle("GET /v0/devices/{id}/notifications", s.APIAuthMiddleware(s.RequireDevice(s.handleListNotifications)))
+	s.Router.Handle("POST /v0/devices/{id}/notifications", s.APIAuthMiddleware(s.RequireDevice(s.handleCreateNotification)))
+	s.Router.Handle("DELETE /v0/devices/{id}/notifications/by-key", s.APIAuthMiddleware(s.RequireDevice(s.handleDeleteNotificationByKey)))
+	s.Router.Handle("DELETE /v0/devices/{id}/notifications/{notificationId}", s.APIAuthMiddleware(s.RequireDevice(s.handleDeleteNotification)))
 	s.Router.Handle("GET /v0/devices/{id}/installations", s.APIAuthMiddleware(s.RequireDevice(s.handleListInstallations)))
 	s.Router.Handle("GET /v0/devices/{id}/installations/{iname}", s.APIAuthMiddleware(s.RequireDevice(s.handleGetInstallation)))
 	s.Router.Handle("PATCH /v0/devices/{id}", s.APIAuthMiddleware(s.RequireDevice(s.handlePatchDevice)))

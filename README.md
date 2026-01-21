@@ -1,5 +1,25 @@
 # Tronbyt Server
 
+## Fork additions (overrides + notifications)
+
+This fork adds **short‑lived, API‑driven messaging** for devices:
+
+- **Overrides API**: low‑level “show this image now” controls (pinned or interstitial), with optional display time and frequency.
+- **Notifications API**: higher‑level messages that can be **text‑rendered** (title/subtitle/icon) or **raw WebP**, with
+  optional `source` + `key` **dedupe** so integrations can update/delete without tracking IDs.
+- **Pin → interstitial flow**: notifications can start pinned, then continue as interstitials for a defined period.
+- **Priority support**: lets urgent messages win when multiple notifications overlap.
+
+Start here:
+
+- API usage: https://github.com/miracle2k/tronbyt-server/blob/main/docs/api-usage.md
+- Home Assistant usage: https://github.com/miracle2k/tronbyt-server/blob/main/docs/homeassistant-usage.md
+
+## Usage
+
+- API usage: https://github.com/miracle2k/tronbyt-server/blob/main/docs/api-usage.md
+- Home Assistant usage: https://github.com/miracle2k/tronbyt-server/blob/main/docs/homeassistant-usage.md
+
 The Tronbyt Server is a Go-based application designed to manage apps on Tronbyt devices locally, without relying on Tidbyt's backend servers. It offers a web UI for app discoverability and operates independently of cloud dependencies, ensuring continued functionality even if Tidbyt's servers are offline. The server also enables some APIs that were previously blocked by Tidbyt's servers, such as Surfline apps, and supports custom hardware.
 
 However, there are some drawbacks, including the lack of a mobile app, slightly higher latency for notifications, and limited support for some built-in apps and apps relying on Tidbyt's cloud services for secrets.

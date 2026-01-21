@@ -21,7 +21,7 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("Failed to open DB: %v", err)
 	}
 
-	if err := db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.WebAuthnCredential{}, &data.Setting{}); err != nil {
+	if err := db.AutoMigrate(&data.User{}, &data.Device{}, &data.App{}, &data.DeviceOverride{}, &data.DeviceNotification{}, &data.WebAuthnCredential{}, &data.Setting{}); err != nil {
 		t.Fatalf("Failed to migrate DB: %v", err)
 	}
 
