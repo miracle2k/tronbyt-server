@@ -7,7 +7,7 @@ This fork adds **short‑lived, API‑driven messaging** for devices:
 - **Overrides API**: low‑level “show this image now” controls (pinned or interstitial), with optional display time and frequency.
 - **Notifications API**: higher‑level messages that can be **text‑rendered** (title/subtitle/icon) or **raw WebP**, with
   optional `source` + `key` **dedupe** so integrations can update/delete without tracking IDs.
-- **Pin → interstitial flow**: notifications can start pinned, then continue as interstitials for a defined period.
+- **Pin → interstitial flow**: notifications can start pinned, then continue as interstitials for a defined period, their frequency decreasing over time.
 - **Priority support**: lets urgent messages win when multiple notifications overlap.
 
 Try it with the current fork image:
@@ -22,7 +22,13 @@ Start here:
 
 Documenting some design decisions here:
 
-- The duration properties for overwrites/notifications are a minimum. An app or notification will not interrupt it's on `displayTime`; so a notification targeting 12s which a displayTime of 10s will be shown for 20s.
+- Default display time (if not specified) for overrides/notifications is the default app display time.
+
+- priorities are there, but you probably don't want to use them. Notifications that share the same priority share their display time, notifications/override with a higher priority completely hide those with a lower one.
+
+- The duration properties for overwrites/notifications are a minimum. An app or notification will not interrupt it's own `displayTime`; so a notification targeting 12s which a displayTime of 10s will be shown for 20s. Did not want duration to be expressed by a "repeat this often" counter in the API.
+
+- On the other hand, for expressing "how often should this overlay be shown" we express it *not* as a time, but as "between each app", "between each second app" etc; it feels intuitive to me that notifications naturally compete with your other content for attention; so as a notification degrades in priority over time until it reaches expiry, if you have a lot of apps installed, at any given time the notification will be shown less frequently; if you have few, you will effectively see it more frequently.
 
 ## Usage
 
