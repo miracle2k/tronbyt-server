@@ -61,13 +61,14 @@ def main(config):
 
     text_column = render.Column(
         children = lines,
-        main_align = "start",
+        expanded = True,
+        main_align = "center",
         cross_align = "start",
     )
 
-    scrollable = render.Marquee(
+    text_content = render.Box(
+        width = text_width,
         height = text_height,
-        scroll_direction = "vertical",
         child = text_column,
     )
 
@@ -78,15 +79,11 @@ def main(config):
             children = [
                 render.Box(width = ICON_SIZE, height = ICON_SIZE, child = icon_widget),
                 render.Box(width = ICON_GAP, height = 1),
-                render.Box(
-                    width = text_width,
-                    height = text_height,
-                    child = scrollable,
-                ),
+                text_content,
             ],
         )
     else:
-        content = scrollable
+        content = text_content
 
     return render.Root(
         child = render.Box(padding = PADDING, color = bg_color, child = content),
