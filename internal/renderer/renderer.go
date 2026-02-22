@@ -11,6 +11,7 @@ import (
 	"github.com/tronbyt/pixlet/runtime"
 	"github.com/tronbyt/pixlet/runtime/modules/render_runtime/canvas"
 	"github.com/tronbyt/pixlet/server/loader"
+	"go.starlark.net/starlark"
 	"golang.org/x/text/language"
 )
 
@@ -70,6 +71,118 @@ func Render(
 		loader.WithLanguage(lang),
 		loader.WithFilters(renderFilters),
 	)
+}
+
+// RenderSource executes Starlark source from memory and returns WebP image bytes.
+func RenderSource(
+	ctx context.Context,
+	id string,
+	src []byte,
+	config map[string]any,
+	width, height int,
+	maxDuration time.Duration,
+	timeout time.Duration,
+	silenceOutput bool,
+	output2x bool,
+	timezone *string,
+	locale *string,
+	filters []string,
+) ([]byte, []string, error) {
+	location := time.Local
+	if timezone != nil && *timezone != "" {
+		v, err := time.LoadLocation(*timezone)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid timezone: %v", err)
+		}
+		location = v
+	}
+
+	lang := language.English
+	if locale != nil && *locale != "" {
+		var err error
+		lang, err = language.Parse(*locale)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid locale: %v", err)
+		}
+	}
+
+	meta := canvas.Metadata{
+		Width:  width,
+		Height: height,
+		Is2x:   output2x,
+	}
+
+	opts := []runtime.AppletOption{
+		runtime.WithCanvasMeta(meta),
+		runtime.WithLocation(location),
+		runtime.WithLanguage(lang),
+	}
+
+	var output []string
+	if silenceOutput {
+		opts = append(opts, runtime.WithPrintFunc(func(_ *starlark.Thread, msg string) {
+			output = append(output, msg)
+		}))
+	}
+
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, timeout, fmt.Errorf("timeout after %s", timeout))
+		defer cancel()
+	}
+
+	applet, err := runtime.NewApplet(id, src, opts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load applet: %w", err)
+	}
+	defer func() {
+		if err := applet.Close(); err != nil {
+			slog.Error("failed to close applet", "error", err)
+		}
+	}()
+
+	renderFilters := encode.RenderFilters{Magnify: 1}
+	for _, f := range filters {
+		var cf encode.ColorFilter
+		if err := cf.UnmarshalText([]byte(f)); err == nil {
+			renderFilters.ColorFilter = cf
+		}
+	}
+
+	if meta.Is2x && (applet.Manifest == nil || !applet.Manifest.Supports2x) {
+		meta.Is2x = false
+		renderFilters.Magnify *= 2
+	}
+
+	roots, err := applet.RunWithConfig(ctx, config)
+	if err != nil {
+		return nil, output, fmt.Errorf("error running script: %w", err)
+	}
+
+	screens := encode.ScreensFromRoots(roots, meta.ScaledWidth(), meta.ScaledHeight())
+
+	filter := encode.ImageFilter(nil)
+	var chain []encode.ImageFilter
+	if renderFilters.Magnify > 1 {
+		chain = append(chain, encode.Magnify(renderFilters.Magnify))
+	}
+	if imageFilter, err := renderFilters.ColorFilter.ImageFilter(); err == nil && imageFilter != nil {
+		chain = append(chain, imageFilter)
+	}
+	if len(chain) > 0 {
+		filter = encode.Chain(chain...)
+	}
+
+	if screens.ShowFullAnimation {
+		maxDuration = 0
+	}
+
+	buf, err := screens.EncodeWebP(maxDuration, filter)
+	if err != nil {
+		return nil, output, fmt.Errorf("error rendering: %w", err)
+	}
+
+	return buf, output, nil
 }
 
 // GetSchema returns the schema JSON for the given script.

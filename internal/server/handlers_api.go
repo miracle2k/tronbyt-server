@@ -100,6 +100,7 @@ type OverridePayload struct {
 // NotificationCreateRequest represents a request to create a device notification.
 type NotificationCreateRequest struct {
 	Mode               string `json:"mode"`
+	Level              string `json:"level"`
 	Priority           *int   `json:"priority"`
 	PinForSec          *int   `json:"pinForSec"`
 	InterstitialForSec *int   `json:"interstitialForSec"`
@@ -118,6 +119,7 @@ type NotificationPayload struct {
 	Source             *string `json:"source,omitempty"`
 	Key                *string `json:"key,omitempty"`
 	Mode               string  `json:"mode"`
+	Level              string  `json:"level"`
 	Priority           int     `json:"priority"`
 	PinUntil           *string `json:"pinUntil,omitempty"`
 	InterstitialEveryN *int    `json:"interstitialEveryN,omitempty"`
@@ -465,6 +467,7 @@ func (s *Server) toNotificationPayload(n *data.DeviceNotification) NotificationP
 		Source:             n.Source,
 		Key:                n.Key,
 		Mode:               n.Mode,
+		Level:              n.Level,
 		Priority:           n.Priority,
 		PinUntil:           pinUntil,
 		InterstitialEveryN: n.InterstitialEveryN,
@@ -741,6 +744,17 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		return imgBytes, nil
 	}
 
+	level := strings.TrimSpace(req.Level)
+	if level == "" {
+		level = "info"
+	}
+	switch level {
+	case "info", "warning", "alert":
+	default:
+		http.Error(w, "Invalid level; must be info, warning, or alert", http.StatusBadRequest)
+		return
+	}
+
 	var imgBytes []byte
 	if hasText {
 		iconB64 := ""
@@ -753,7 +767,7 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 			iconB64 = base64.StdEncoding.EncodeToString(iconBytes)
 		}
 
-		rendered, err := s.renderNotificationImage(r.Context(), device, trimTitle, trimSubtitle, trimSubtitle2, iconB64)
+		rendered, err := s.renderNotificationImage(r.Context(), device, trimTitle, trimSubtitle, trimSubtitle2, iconB64, level)
 		if err != nil {
 			slog.Error("Failed to render notification", "error", err)
 			http.Error(w, "Failed to render notification", http.StatusInternalServerError)
@@ -867,6 +881,7 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		Source:             sourcePtr,
 		Key:                keyPtr,
 		Mode:               mode,
+		Level:              level,
 		Priority:           priority,
 		PinUntil:           pinUntil,
 		InterstitialUntil:  interstitialUntil,

@@ -5,45 +5,56 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
+	"time"
 
 	"tronbyt-server/internal/data"
+	"tronbyt-server/internal/renderer"
 )
 
 //go:embed assets/notification.star
-var notificationTemplate string
+var notificationTemplate []byte
 
-func (s *Server) ensureNotificationTemplatePath() (string, error) {
-	dir := filepath.Join(s.DataDir, "notification")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, "notification.star")
-	if _, err := os.Stat(path); err == nil {
-		return path, nil
-	}
-	if err := os.WriteFile(path, []byte(notificationTemplate), 0644); err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
-func (s *Server) renderNotificationImage(ctx context.Context, device *data.Device, title, subtitle, subtitle2, iconB64 string) ([]byte, error) {
-	path, err := s.ensureNotificationTemplatePath()
-	if err != nil {
-		return nil, err
-	}
+func (s *Server) renderNotificationImage(ctx context.Context, device *data.Device, title, subtitle, subtitle2, iconB64, level string) ([]byte, error) {
 	config := map[string]any{
 		"title":     title,
 		"subtitle":  subtitle,
 		"subtitle2": subtitle2,
+		"level":     level,
 	}
 	if iconB64 != "" {
 		config["icon"] = iconB64
 	}
 
-	imgBytes, messages, err := s.RenderApp(ctx, device, nil, path, config)
+	var deviceTimezone string
+	var locale *string
+	supports2x := false
+	var appInterval int
+	var filters []string
+
+	if device != nil {
+		deviceTimezone = device.GetTimezone()
+		locale = device.Locale
+		supports2x = device.Type.Supports2x()
+		appInterval = device.GetEffectiveDwellTime(nil)
+		filters = s.getEffectiveFilters(device, nil)
+	} else {
+		appInterval = 15
+	}
+
+	imgBytes, messages, err := renderer.RenderSource(
+		ctx,
+		"notification",
+		notificationTemplate,
+		config,
+		64, 32,
+		time.Duration(appInterval)*time.Second,
+		30*time.Second,
+		true,
+		supports2x,
+		&deviceTimezone,
+		locale,
+		filters,
+	)
 	for _, msg := range messages {
 		slog.Debug("Notification render message", "message", msg)
 	}
