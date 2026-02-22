@@ -99,19 +99,26 @@ type OverridePayload struct {
 
 // NotificationCreateRequest represents a request to create a device notification.
 type NotificationCreateRequest struct {
-	Mode               string `json:"mode"`
-	Level              string `json:"level"`
-	Priority           *int   `json:"priority"`
-	PinForSec          *int   `json:"pinForSec"`
-	InterstitialForSec *int   `json:"interstitialForSec"`
-	InterstitialEveryN *int   `json:"interstitialEveryN"`
-	Source             string `json:"source"`
-	Key                string `json:"key"`
-	Title              string `json:"title"`
-	Subtitle           string `json:"subtitle"`
-	Subtitle2          string `json:"subtitle2"`
-	Icon               string `json:"icon"`
-	Image              string `json:"image"`
+	Mode               string                     `json:"mode"`
+	Level              string                     `json:"level"`
+	Priority           *int                       `json:"priority"`
+	PinForSec          *int                       `json:"pinForSec"`
+	InterstitialForSec *int                       `json:"interstitialForSec"`
+	InterstitialEveryN *int                       `json:"interstitialEveryN"`
+	Source             string                     `json:"source"`
+	Key                string                     `json:"key"`
+	Title              string                     `json:"title"`
+	Subtitle           string                     `json:"subtitle"`
+	Subtitle2          string                     `json:"subtitle2"`
+	Icon               string                     `json:"icon"`
+	Image              string                     `json:"image"`
+	Render             *NotificationRenderRequest `json:"render"`
+}
+
+type NotificationRenderRequest struct {
+	Kind   string         `json:"kind"`
+	Source string         `json:"source"`
+	Config map[string]any `json:"config"`
 }
 
 type NotificationPayload struct {
@@ -692,6 +699,7 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 
 	hasText := trimTitle != ""
 	hasImage := trimImage != ""
+	hasRender := req.Render != nil
 	hasKey := trimSource != "" || trimKey != ""
 
 	var sourcePtr, keyPtr *string
@@ -704,17 +712,52 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		keyPtr = &trimKey
 	}
 
-	if !hasText && (trimSubtitle != "" || trimSubtitle2 != "" || trimIcon != "") {
+	if !hasText && !hasRender && (trimSubtitle != "" || trimSubtitle2 != "" || trimIcon != "") {
 		http.Error(w, "Title is required for text notifications", http.StatusBadRequest)
 		return
 	}
-	if hasText && hasImage {
-		http.Error(w, "Provide either title or image, not both", http.StatusBadRequest)
+	if hasRender && (trimSubtitle != "" || trimSubtitle2 != "" || trimIcon != "") {
+		http.Error(w, "subtitle, subtitle2, and icon are only supported for title notifications", http.StatusBadRequest)
 		return
 	}
-	if !hasText && !hasImage {
-		http.Error(w, "Missing image or title", http.StatusBadRequest)
+
+	payloadKinds := 0
+	if hasText {
+		payloadKinds++
+	}
+	if hasImage {
+		payloadKinds++
+	}
+	if hasRender {
+		payloadKinds++
+	}
+	if payloadKinds > 1 {
+		http.Error(w, "Provide exactly one of title, image, or render", http.StatusBadRequest)
 		return
+	}
+	if payloadKinds == 0 {
+		http.Error(w, "Missing image, title, or render", http.StatusBadRequest)
+		return
+	}
+
+	renderKind := ""
+	renderSource := ""
+	var renderConfig map[string]any
+	if hasRender {
+		renderKind = strings.TrimSpace(req.Render.Kind)
+		if renderKind == "" {
+			renderKind = "starlark"
+		}
+		if renderKind != "starlark" {
+			http.Error(w, "Invalid render kind; must be starlark", http.StatusBadRequest)
+			return
+		}
+		renderSource = strings.TrimSpace(req.Render.Source)
+		if renderSource == "" {
+			http.Error(w, "Render source is required", http.StatusBadRequest)
+			return
+		}
+		renderConfig = req.Render.Config
 	}
 
 	var existingNotification *data.DeviceNotification
@@ -774,13 +817,21 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 			return
 		}
 		imgBytes = rendered
-	} else {
+	} else if hasImage {
 		var err error
 		imgBytes, err = decodeBase64Payload(trimImage)
 		if err != nil {
 			http.Error(w, "Invalid Base64 Image", http.StatusBadRequest)
 			return
 		}
+	} else {
+		rendered, err := s.renderNotificationSource(r.Context(), device, []byte(renderSource), renderConfig)
+		if err != nil {
+			slog.Warn("Failed to render custom notification source", "error", err)
+			http.Error(w, "Failed to render notification source", http.StatusBadRequest)
+			return
+		}
+		imgBytes = rendered
 	}
 
 	priority := 0

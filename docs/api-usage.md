@@ -16,7 +16,8 @@ Authorization: Bearer $API_KEY
 
 Notifications are high-level, short-lived messages. They can be created from:
 - A base64 WebP image (`image`), or
-- Text fields (`title`, optional `subtitle` and `subtitle2`), which the server renders.
+- Text fields (`title`, optional `subtitle` and `subtitle2`), which the server renders, or
+- An inline render payload (`render`) that includes Starlark source + config.
 
 `mode` options:
 - `expiring` (default): use `pinForSec` and/or `interstitialForSec`.
@@ -81,6 +82,23 @@ curl -sS -X POST "$SERVER/v0/devices/$DEVICE_ID/notifications" \
   }'
 ```
 
+### Create (self-rendering notification)
+```bash
+curl -sS -X POST "$SERVER/v0/devices/$DEVICE_ID/notifications" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pinForSec":300,
+    "source":"homeassistant",
+    "key":"dryer_done",
+    "render":{
+      "kind":"starlark",
+      "source":"load(\"render.star\", \"render\")\n\ndef main(config):\n    color = config.str(\"color\", \"#102030\")\n    return render.Root(child=render.Box(width=64, height=32, color=color))",
+      "config":{"color":"#003366"}
+    }
+  }'
+```
+
 ### List
 ```bash
 curl -sS -H "Authorization: Bearer $API_KEY" \
@@ -101,10 +119,12 @@ curl -sS -X DELETE -H "Authorization: Bearer $API_KEY" \
 
 Notes:
 - `source` + `key` is optional but recommended. It lets you update/delete without tracking IDs.
+- Provide exactly one payload type per request: `title` (text), `image`, or `render`.
 - `priority` is optional; higher wins if multiple notifications overlap.
 - During night mode, only overrides with priority >= 100 are eligible.
 - `mode` defaults to `expiring`, which uses `pinForSec` and/or `interstitialForSec`.
 - `interstitialEveryN` is only valid with `interstitial-sticky` (default is 1 = every gap).
+- `render.kind` currently supports `starlark`.
 
 ## Overrides
 

@@ -1082,6 +1082,56 @@ func TestHandleCreateNotification_Text(t *testing.T) {
 	}
 }
 
+func TestHandleCreateNotification_RenderSource(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+
+	source := `load("render.star", "render")
+
+def main(config):
+    color = config.str("color", "#001122")
+    return render.Root(child=render.Box(width=64, height=32, color=color))
+`
+
+	body, _ := json.Marshal(map[string]any{
+		"pinForSec": 60,
+		"render": map[string]any{
+			"kind":   "starlark",
+			"source": source,
+			"config": map[string]any{
+				"color": "#224466",
+			},
+		},
+	})
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Notifications []NotificationPayload `json:"notifications"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(resp.Notifications))
+	}
+
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("managed_by_notif = ?", resp.Notifications[0].ID).
+		Find(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load overrides: %v", err)
+	}
+	if len(overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(overrides))
+	}
+}
+
 func TestHandleCreateNotification_PinSticky(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "device_api_key"
@@ -1420,10 +1470,41 @@ func TestHandleCreateNotification_Invalid(t *testing.T) {
 			},
 		},
 		{
+			name: "both image and render",
+			body: map[string]any{
+				"pinForSec": 60,
+				"image":     base64.StdEncoding.EncodeToString([]byte("img")),
+				"render": map[string]any{
+					"source": `load("render.star", "render")
+def main(config):
+    return render.Root(child=render.Box(width=64, height=32, color="#000000"))`,
+				},
+			},
+		},
+		{
 			name: "subtitle without title",
 			body: map[string]any{
 				"pinForSec": 60,
 				"subtitle":  "No title",
+			},
+		},
+		{
+			name: "render without source",
+			body: map[string]any{
+				"pinForSec": 60,
+				"render": map[string]any{
+					"kind": "starlark",
+				},
+			},
+		},
+		{
+			name: "invalid render kind",
+			body: map[string]any{
+				"pinForSec": 60,
+				"render": map[string]any{
+					"kind":   "python",
+					"source": "print('hello')",
+				},
 			},
 		},
 		{

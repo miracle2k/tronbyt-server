@@ -14,6 +14,8 @@ import (
 //go:embed assets/notification.star
 var notificationTemplate []byte
 
+const maxNotificationRenderSourceBytes = 16 * 1024
+
 func (s *Server) renderNotificationImage(ctx context.Context, device *data.Device, title, subtitle, subtitle2, iconB64, level string) ([]byte, error) {
 	config := map[string]any{
 		"title":     title,
@@ -25,6 +27,20 @@ func (s *Server) renderNotificationImage(ctx context.Context, device *data.Devic
 		config["icon"] = iconB64
 	}
 
+	return s.renderNotificationSourceWithID(ctx, device, "notification", notificationTemplate, config)
+}
+
+func (s *Server) renderNotificationSource(ctx context.Context, device *data.Device, source []byte, config map[string]any) ([]byte, error) {
+	if len(source) == 0 {
+		return nil, fmt.Errorf("notification render source is empty")
+	}
+	if len(source) > maxNotificationRenderSourceBytes {
+		return nil, fmt.Errorf("notification render source exceeds %d bytes", maxNotificationRenderSourceBytes)
+	}
+	return s.renderNotificationSourceWithID(ctx, device, "notification-custom", source, config)
+}
+
+func (s *Server) renderNotificationSourceWithID(ctx context.Context, device *data.Device, sourceID string, source []byte, config map[string]any) ([]byte, error) {
 	var deviceTimezone string
 	var locale *string
 	supports2x := false
@@ -41,10 +57,14 @@ func (s *Server) renderNotificationImage(ctx context.Context, device *data.Devic
 		appInterval = 15
 	}
 
+	if config == nil {
+		config = map[string]any{}
+	}
+
 	imgBytes, messages, err := renderer.RenderSource(
 		ctx,
-		"notification",
-		notificationTemplate,
+		sourceID,
+		source,
 		config,
 		64, 32,
 		time.Duration(appInterval)*time.Second,
