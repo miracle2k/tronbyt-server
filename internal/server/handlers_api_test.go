@@ -1138,6 +1138,114 @@ func TestHandleCreateNotification_PinSticky(t *testing.T) {
 	}
 }
 
+func TestHandleCreateNotification_PinStickyWithExpiresAt(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+	expiresAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+	body, _ := json.Marshal(map[string]any{
+		"mode":      "pin-sticky",
+		"title":     "Leased pin",
+		"expiresAt": expiresAt.Format(time.RFC3339),
+	})
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Notifications []NotificationPayload `json:"notifications"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(resp.Notifications))
+	}
+	if resp.Notifications[0].EndsAt == nil || *resp.Notifications[0].EndsAt != expiresAt.Format(time.RFC3339) {
+		t.Fatalf("expected response endsAt %s, got %v", expiresAt.Format(time.RFC3339), resp.Notifications[0].EndsAt)
+	}
+
+	notification, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("id = ?", resp.Notifications[0].ID).
+		First(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load notification: %v", err)
+	}
+	if notification.EndsAt == nil || !notification.EndsAt.Equal(expiresAt) {
+		t.Fatalf("expected notification ends_at %s, got %v", expiresAt, notification.EndsAt)
+	}
+
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("managed_by_notif = ?", notification.ID).
+		Find(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load overrides: %v", err)
+	}
+	if len(overrides) != 1 || overrides[0].Kind != data.OverridePinned {
+		t.Fatalf("expected one pinned override, got %#v", overrides)
+	}
+	if overrides[0].EndsAt == nil || !overrides[0].EndsAt.Equal(expiresAt) {
+		t.Fatalf("expected override ends_at %s, got %v", expiresAt, overrides[0].EndsAt)
+	}
+}
+
+func TestHandleCreateNotification_InterstitialStickyWithExpiresAt(t *testing.T) {
+	s := newTestServerAPI(t)
+	apiKey := "device_api_key"
+	expiresAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+	body, _ := json.Marshal(map[string]any{
+		"mode":               "interstitial-sticky",
+		"interstitialEveryN": 2,
+		"title":              "Leased interstitial",
+		"expiresAt":          expiresAt.Format(time.RFC3339),
+	})
+	req := newAPIRequest(http.MethodPost, "/v0/devices/testdevice/notifications", apiKey, body)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Notifications []NotificationPayload `json:"notifications"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(resp.Notifications))
+	}
+
+	notification, err := gorm.G[data.DeviceNotification](s.DB).
+		Where("id = ?", resp.Notifications[0].ID).
+		First(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load notification: %v", err)
+	}
+	if notification.EndsAt == nil || !notification.EndsAt.Equal(expiresAt) {
+		t.Fatalf("expected notification ends_at %s, got %v", expiresAt, notification.EndsAt)
+	}
+
+	overrides, err := gorm.G[data.DeviceOverride](s.DB).
+		Where("managed_by_notif = ?", notification.ID).
+		Find(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load overrides: %v", err)
+	}
+	if len(overrides) != 1 || overrides[0].Kind != data.OverrideInterstitial {
+		t.Fatalf("expected one interstitial override, got %#v", overrides)
+	}
+	if overrides[0].EndsAt == nil || !overrides[0].EndsAt.Equal(expiresAt) {
+		t.Fatalf("expected override ends_at %s, got %v", expiresAt, overrides[0].EndsAt)
+	}
+}
+
 func TestHandleCreateNotification_InterstitialSticky(t *testing.T) {
 	s := newTestServerAPI(t)
 	apiKey := "device_api_key"
@@ -1440,6 +1548,30 @@ func TestHandleCreateNotification_Invalid(t *testing.T) {
 				"pinForSec": 60,
 				"image":     base64.StdEncoding.EncodeToString([]byte("img")),
 				"key":       "dishwasher_done",
+			},
+		},
+		{
+			name: "expiresAt with expiring mode",
+			body: map[string]any{
+				"pinForSec": 60,
+				"title":     "Hi",
+				"expiresAt": time.Now().Add(time.Hour).Format(time.RFC3339),
+			},
+		},
+		{
+			name: "invalid expiresAt",
+			body: map[string]any{
+				"mode":      "pin-sticky",
+				"title":     "Hi",
+				"expiresAt": "tomorrow",
+			},
+		},
+		{
+			name: "past expiresAt",
+			body: map[string]any{
+				"mode":      "pin-sticky",
+				"title":     "Hi",
+				"expiresAt": time.Now().Add(-time.Hour).Format(time.RFC3339),
 			},
 		},
 	}

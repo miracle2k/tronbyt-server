@@ -105,6 +105,7 @@ type NotificationCreateRequest struct {
 	PinForSec          *int   `json:"pinForSec"`
 	InterstitialForSec *int   `json:"interstitialForSec"`
 	InterstitialEveryN *int   `json:"interstitialEveryN"`
+	ExpiresAt          string `json:"expiresAt"`
 	Source             string `json:"source"`
 	Key                string `json:"key"`
 	Title              string `json:"title"`
@@ -689,6 +690,7 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 	trimImage := strings.TrimSpace(req.Image)
 	trimSource := strings.TrimSpace(req.Source)
 	trimKey := strings.TrimSpace(req.Key)
+	trimExpiresAt := strings.TrimSpace(req.ExpiresAt)
 
 	hasText := trimTitle != ""
 	hasImage := trimImage != ""
@@ -850,6 +852,24 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 	}
 
 	now := time.Now()
+	var expiresAt *time.Time
+	if trimExpiresAt != "" {
+		if mode == "expiring" {
+			http.Error(w, "expiresAt is only supported with sticky notification modes", http.StatusBadRequest)
+			return
+		}
+		parsedExpiresAt, err := time.Parse(time.RFC3339Nano, trimExpiresAt)
+		if err != nil {
+			http.Error(w, "expiresAt must be a valid RFC3339 timestamp", http.StatusBadRequest)
+			return
+		}
+		if !parsedExpiresAt.After(now) {
+			http.Error(w, "expiresAt must be in the future", http.StatusBadRequest)
+			return
+		}
+		expiresAt = &parsedExpiresAt
+	}
+
 	var pinUntil *time.Time
 	var interstitialUntil *time.Time
 	interstitialStart := now
@@ -873,6 +893,8 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 		case pinUntil != nil:
 			endsAt = pinUntil
 		}
+	} else if expiresAt != nil {
+		endsAt = expiresAt
 	}
 
 	notification := data.DeviceNotification{
@@ -891,6 +913,15 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 	}
 
 	var overrides []data.DeviceOverride
+	pinnedEndsAt := pinUntil
+	if mode == "pin-sticky" {
+		pinnedEndsAt = expiresAt
+	}
+	interstitialEndsAt := interstitialUntil
+	if mode == "interstitial-sticky" {
+		interstitialEndsAt = expiresAt
+	}
+
 	if (mode == "expiring" && pinUntil != nil) || mode == "pin-sticky" {
 		overrideID, err := generateSecureToken(12)
 		if err != nil {
@@ -903,7 +934,7 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 			Kind:           data.OverridePinned,
 			Priority:       priority,
 			StartsAt:       &now,
-			EndsAt:         pinUntil,
+			EndsAt:         pinnedEndsAt,
 			ImageKey:       overrideID,
 			ManagedByNotif: &notificationID,
 		}
@@ -928,7 +959,7 @@ func (s *Server) handleCreateNotification(w http.ResponseWriter, r *http.Request
 			Kind:           data.OverrideInterstitial,
 			Priority:       priority,
 			StartsAt:       &interstitialStart,
-			EndsAt:         interstitialUntil,
+			EndsAt:         interstitialEndsAt,
 			EveryN:         &everyN,
 			ImageKey:       overrideID,
 			ManagedByNotif: &notificationID,

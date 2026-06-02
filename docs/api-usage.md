@@ -20,8 +20,8 @@ Notifications are high-level, short-lived messages. They can be created from:
 
 `mode` options:
 - `expiring` (default): use `pinForSec` and/or `interstitialForSec`.
-- `pin-sticky`: stays pinned until deleted.
-- `interstitial-sticky`: stays interstitial until deleted (`interstitialEveryN` optional).
+- `pin-sticky`: stays pinned until deleted, or until optional `expiresAt`.
+- `interstitial-sticky`: stays interstitial until deleted, or until optional `expiresAt` (`interstitialEveryN` optional).
 
 ### Create (text notification)
 ```bash
@@ -48,6 +48,7 @@ curl -sS -X POST "$SERVER/v0/devices/$DEVICE_ID/notifications" \
     "title":"Dishwasher done",
     "subtitle":"Kitchen",
     "mode":"pin-sticky",
+    "expiresAt":"2026-06-01T18:30:00Z",
     "source":"homeassistant",
     "key":"dishwasher_done"
   }'
@@ -61,6 +62,7 @@ curl -sS -X POST "$SERVER/v0/devices/$DEVICE_ID/notifications" \
   -d '{
     "title":"Laundry done",
     "mode":"interstitial-sticky",
+    "expiresAt":"2026-06-01T18:30:00Z",
     "interstitialEveryN":2,
     "source":"homeassistant",
     "key":"laundry_done"
@@ -105,6 +107,7 @@ Notes:
 - During night mode, only overrides with priority >= 100 are eligible.
 - `mode` defaults to `expiring`, which uses `pinForSec` and/or `interstitialForSec`.
 - `interstitialEveryN` is only valid with `interstitial-sticky` (default is 1 = every gap).
+- `expiresAt` is optional for sticky modes and must be an RFC3339 timestamp in the future. If omitted, sticky notifications preserve the legacy behavior and stay until deleted.
 
 ## Overrides
 
